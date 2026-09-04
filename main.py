@@ -1,6 +1,3 @@
-
-
-
 from fastapi import FastAPI, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -18,7 +15,10 @@ from models import (
     UserDB,
     DriverAssignmentDB,
     GPSLocationDB,
-    DriverDB
+    DriverDB,
+    RouteIncidentDB,
+    RouteDecisionDB,
+    RoadLearningDB
 )
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +30,11 @@ import json
 import urllib.request
 import urllib.parse
 import math
+
+try:
+    from sklearn.ensemble import IsolationForest
+except ImportError:
+    IsolationForest = None
 
 
 # ---------------------------------------------------------
@@ -348,35 +353,15 @@ def register_user(
 # ---------------------------------------------------------
 
 def get_current_user(token: str):
+
     if token not in sessions:
-        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired session"
+        )
+
     return sessions[token]
-
-def get_current_principal(authorization: str | None):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Login required")
-    token = authorization.replace("Bearer ", "").strip()
-    if token in active_driver_tokens:
-        driver_id = get_driver_from_token(token)
-        return {"type": "driver", "username": driver_id, "role": "driver"}
-    user = get_current_user(token)
-    return {"type": "user", "username": user["username"], "role": user.get("role", "dealer")}
-
-def require_shipment_access(shipment_id: str, authorization: str | None, db: Session):
-    principal = get_current_principal(authorization)
-    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
-    if not shipment:
-        raise HTTPException(status_code=404, detail="Shipment not found")
-    if principal["type"] == "driver":
-        assigned = db.query(DriverAssignmentDB).filter(
-            DriverAssignmentDB.shipment_id == shipment_id,
-            DriverAssignmentDB.driver_username == principal["username"]
-        ).first()
-        if not assigned:
-            raise HTTPException(status_code=403, detail="Shipment is not assigned to this driver")
-    elif shipment.owner_username != principal["username"]:
-        raise HTTPException(status_code=403, detail="Access denied")
-    return shipment, principal
 
 
 # ---------------------------------------------------------
@@ -463,9 +448,27 @@ def get_shipments(
 # ---------------------------------------------------------
 
 @app.get("/shipments/{shipment_id}")
-def get_shipment(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
-    shipment, _ = require_shipment_access(shipment_id, authorization, db)
-    return {"shipment": {"shipment_id": shipment.shipment_id, "origin": shipment.origin, "destination": shipment.destination, "weight": shipment.weight, "cargo": shipment.cargo, "status": shipment.status, "owner_username": shipment.owner_username}}
+def get_shipment(
+    shipment_id: str,
+    db: Session = Depends(get_db)
+):
+
+    shipment = db.query(ShipmentDB).filter(
+        ShipmentDB.shipment_id == shipment_id
+    ).first()
+
+
+    if not shipment:
+
+        return {
+            "message": "Shipment not found"
+        }
+
+
+    return {
+        "shipment": shipment
+    }
+
 
 # ---------------------------------------------------------
 # UPDATE SHIPMENT
@@ -513,15 +516,36 @@ def update_shipment(
 # ---------------------------------------------------------
 
 @app.delete("/shipments/{shipment_id}")
-def delete_shipment(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
-    shipment, principal = require_shipment_access(shipment_id, authorization, db)
-    if principal["type"] == "driver":
+def delete_shipment(
+    shipment_id: str,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None)
+):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Login required")
+
+    token = authorization.replace("Bearer ", "").strip()
+    if token in active_driver_tokens:
         raise HTTPException(status_code=403, detail="Drivers cannot delete shipments")
+
+    current_user = get_current_user(token)
+    existing_shipment = db.query(ShipmentDB).filter(
+        ShipmentDB.shipment_id == shipment_id
+    ).first()
+
+    if not existing_shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    if existing_shipment.owner_username != current_user["username"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     db.query(TrackingEventDB).filter(TrackingEventDB.shipment_id == shipment_id).delete(synchronize_session=False)
-    db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id == shipment_id).delete(synchronize_session=False)
     db.query(GPSLocationDB).filter(GPSLocationDB.shipment_id == shipment_id).delete(synchronize_session=False)
-    db.delete(shipment); db.commit()
+    db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id == shipment_id).delete(synchronize_session=False)
+    db.delete(existing_shipment)
+    db.commit()
+
     return {"message": "Shipment deleted successfully"}
+
 
 # =========================================================
 # TRACKING
@@ -529,10 +553,28 @@ def delete_shipment(shipment_id: str, db: Session = Depends(get_db), authorizati
 
 
 @app.get("/shipments/{shipment_id}/tracking")
-def get_tracking_history(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
-    require_shipment_access(shipment_id, authorization, db)
-    events = db.query(TrackingEventDB).filter(TrackingEventDB.shipment_id == shipment_id).all()
-    return {"tracking_history": [{"id": e.id, "shipment_id": e.shipment_id, "status": e.status, "location": e.location} for e in events]}
+def get_tracking_history(
+
+    shipment_id: str,
+
+    db: Session = Depends(get_db)
+
+):
+
+    events = db.query(
+        TrackingEventDB
+    ).filter(
+        TrackingEventDB.shipment_id == shipment_id
+    ).all()
+
+
+    return {
+
+        "tracking_history": events
+    }
+
+
+
 
 # =========================================================
 # DRIVER ASSIGNMENT
@@ -543,12 +585,12 @@ def get_tracking_history(shipment_id: str, db: Session = Depends(get_db), author
 def assign_driver(
     shipment_id: str,
     data: AssignmentRequest,
-    db: Session = Depends(get_db),
-    authorization: str | None = Header(default=None)
+    db: Session = Depends(get_db)
 ):
-    shipment, principal = require_shipment_access(shipment_id, authorization, db)
-    if principal["type"] == "driver":
-        raise HTTPException(status_code=403, detail="Drivers cannot assign drivers")
+
+    shipment = db.query(ShipmentDB).filter(
+        ShipmentDB.shipment_id == shipment_id
+    ).first()
 
     if not shipment:
         raise HTTPException(
@@ -930,368 +972,168 @@ def sample_route_weather(route, origin, destination):
     return results
 
 # =========================================================
-# INTELLIGENCE ENGINE
+# DYNAMIC ROUTE INTELLIGENCE + LEARNING ENGINE
 # =========================================================
 
+HAZARD_RADIUS_KM = 50.0
+INCIDENT_LOOKBACK_DAYS = 30
+INCIDENT_ROUTE_PROXIMITY_KM = 2.0
+NASA_EONET_URL = "https://eonet.gsfc.nasa.gov/api/v3"
+route_cache = {}
 
-def calculate_route_risk(
 
-    route,
+def geocode_location(place):
+    """Strict India-first geocoder used by routing."""
+    return geocode_place(place)
 
-    weather_points
 
-):
-
-    score = 0
-
-    reasons = []
-
-
-    max_rain = 0
-
-    max_probability = 0
-
-
-    for point in weather_points:
-
-        weather = point["weather"]
-
-
-        max_rain = max(
-            max_rain,
-            weather["precipitation_mm"]
-        )
-
-
-        max_probability = max(
-            max_probability,
-            weather["rain_probability"]
-        )
-
-
-    # Heavy rainfall
-
-    if max_rain >= 50:
-
-        score += 35
-
-        reasons.append(
-            "Heavy rainfall forecast"
-        )
-
-    elif max_rain >= 25:
-
-        score += 20
-
-        reasons.append(
-            "Moderate rainfall forecast"
-        )
-
-    elif max_rain >= 10:
-
-        score += 10
-
-        reasons.append(
-            "Some rainfall forecast"
-        )
-
-
-    # High rain probability
-
-    if max_probability >= 80:
-
-        score += 20
-
-        reasons.append(
-            "High probability of precipitation"
-        )
-
-    elif max_probability >= 60:
-
-        score += 10
-
-        reasons.append(
-            "Elevated precipitation probability"
-        )
-
-
-    # NER terrain heuristic
-
-    ner_points = 0
-
-
-    for point in weather_points:
-
-        lat = point["latitude"]
-
-        lon = point["longitude"]
-
-
-        if (
-
-            21.5 <= lat <= 29.5
-
-            and
-
-            88.0 <= lon <= 97.5
-
-        ):
-
-            ner_points += 1
-
-
-    if ner_points > 0 and max_rain >= 25:
-
-        score += 20
-
-        reasons.append(
-            "Rainfall may increase "
-            "landslide/accessibility risk "
-            "in the NER terrain"
-        )
-
-
-    # Route duration factor
-
-    hours = route["duration"] / 3600
-
-
-    if hours > 12:
-
-        score += 10
-
-        reasons.append(
-            "Long route duration"
-        )
-
-
-    if score >= 50:
-
-        risk = "HIGH"
-
-    elif score >= 25:
-
-        risk = "MEDIUM"
-
-    else:
-
-        risk = "LOW"
-
-
-    if not reasons:
-
-        reasons.append(
-            "No major weather risk indicators detected"
-        )
-
-
-    return {
-
-        "risk": risk,
-
-        "score": min(score, 100),
-
-        "reasons": reasons,
-
-        "rainfall_mm": max_rain,
-
-        "rain_probability": max_probability
-    }
-
-
-# =========================================================
-# ROUTE INTELLIGENCE — LIVE WEATHER + NASA EONET HAZARDS
-# =========================================================
-
-def geocode_location(location):
-    """Geocode an Indian place name, avoiding ambiguous global matches."""
-    key = location.strip().lower()
-    if key in geocode_cache:
-        return geocode_cache[key]
-
-    params = urllib.parse.urlencode({
-        "q": location.strip() + ", India",
-        "format": "jsonv2",
-        "limit": 1,
-        "countrycodes": "in"
-    })
-    url = "https://nominatim.openstreetmap.org/search?" + params
-    request = urllib.request.Request(url, headers={"User-Agent": "NER-Smart-Logistics-Prototype/1.0"})
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            data = json.loads(response.read().decode())
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Geocoding service error: {str(e)}")
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Could not find Indian location: {location}")
-    result = {
-        "latitude": float(data[0]["lat"]),
-        "longitude": float(data[0]["lon"]),
-        "display_name": data[0].get("display_name", location)
-    }
-    geocode_cache[key] = result
-    return result
-
-
-def get_routes(origin_lat, origin_lon, destination_lat, destination_lon):
-    coordinates = f"{origin_lon},{origin_lat};{destination_lon},{destination_lat}"
-    url = (
-        "https://router.project-osrm.org/route/v1/driving/" + coordinates +
-        "?alternatives=true&overview=full&geometries=geojson&steps=true"
+def _request_json(url, timeout=20):
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "NER-Smart-Logistics-Prototype/2.0"}
     )
-    request = urllib.request.Request(url, headers={"User-Agent": "NER-Smart-Logistics-Prototype/1.0"})
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.loads(response.read().decode())
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Route service error: {str(e)}")
-    if data.get("code") != "Ok":
-        raise HTTPException(status_code=400, detail=f"OSRM error: {data}")
-    routes = data.get("routes", [])
-    if not routes:
-        raise HTTPException(status_code=404, detail="No route found")
-    return routes
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode())
 
 
-def sample_route_points(route, count=5):
-    coords = (route.get("geometry") or {}).get("coordinates", []) or []
+def _bbox_around_point(lat, lon, radius_km=HAZARD_RADIUS_KM):
+    lat_delta = radius_km / 111.0
+    lon_delta = radius_km / max(111.0 * math.cos(math.radians(lat)), 0.1)
+    return lon - lon_delta, lat - lat_delta, lon + lon_delta, lat + lat_delta
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0088
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def point_to_route_distance_km(lat, lon, route_coordinates):
+    if not route_coordinates:
+        return float("inf")
+    best = float("inf")
+    for point in route_coordinates[::max(1, len(route_coordinates) // 250)]:
+        if len(point) >= 2:
+            best = min(best, haversine_km(lat, lon, float(point[1]), float(point[0])))
+    return best
+
+
+def route_coordinates(route):
+    geometry = route.get("geometry") or {}
+    return geometry.get("coordinates", []) if isinstance(geometry, dict) else []
+
+
+def sample_route_points(route, count=7):
+    coords = route_coordinates(route)
     if not coords:
         return []
-    count = min(count, len(coords))
     indexes = sorted(set(round(i * (len(coords) - 1) / max(count - 1, 1)) for i in range(count)))
-    return [{"latitude": float(coords[i][1]), "longitude": float(coords[i][0])}
-            for i in indexes if isinstance(coords[i], list) and len(coords[i]) >= 2]
+    return [(float(coords[i][1]), float(coords[i][0])) for i in indexes if len(coords[i]) >= 2]
 
 
-def sample_route_weather(route, origin=None, destination=None):
+def sample_route_weather(route):
     results = []
-    for point in sample_route_points(route, 5):
+    for lat, lon in sample_route_points(route):
         try:
-            weather = get_weather(point["latitude"], point["longitude"])
-            results.append({**point, "weather": weather})
+            results.append({"latitude": lat, "longitude": lon, "weather": get_weather(lat, lon)})
         except Exception:
-            continue
+            pass
     return results
 
 
-def _haversine_km(lat1, lon1, lat2, lon2):
-    r = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp, dl = math.radians(lat2-lat1), math.radians(lon2-lon1)
-    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
-    return 2*r*math.asin(math.sqrt(a))
-
-
-def _geometry_points(geometry):
-    """Extract representative [lon,lat] points from EONET Point/Polygon geometries."""
-    if not isinstance(geometry, dict):
-        return []
-    coords = geometry.get("coordinates")
-    out = []
+def _event_point(event):
+    geometry = event.get("geometry") or []
+    if not isinstance(geometry, list) or not geometry:
+        return None
+    latest = geometry[-1]
+    coords = latest.get("coordinates") if isinstance(latest, dict) else None
+    if isinstance(coords, list) and len(coords) >= 2 and isinstance(coords[0], (int, float)):
+        return float(coords[1]), float(coords[0])
+    # Polygon / multipoint fallback: use the first coordinate recursively.
     def walk(x):
-        if isinstance(x, (list, tuple)) and len(x) >= 2 and isinstance(x[0], (int,float)) and isinstance(x[1], (int,float)):
-            out.append((float(x[1]), float(x[0])))
-        elif isinstance(x, (list, tuple)):
+        if isinstance(x, list) and len(x) >= 2 and all(isinstance(v, (int, float)) for v in x[:2]):
+            return float(x[1]), float(x[0])
+        if isinstance(x, list):
             for y in x:
-                walk(y)
-    walk(coords)
-    return out
+                found = walk(y)
+                if found:
+                    return found
+        return None
+    return walk(coords)
 
 
-def get_nasa_eonet_hazards(route):
-    """Fetch recent/open NASA EONET Flood and Landslide events near sampled route points.
-    These are observed/curated events, NOT invented probabilities.
-    """
-    points = sample_route_points(route, 5)
-    if not points:
-        return {"flood": [], "landslide": []}
+def get_nasa_events_near_point(lat, lon, category, days=30):
+    """NASA EONET continuously updated event metadata, limited to a 50 km bbox."""
+    ll_lon, ll_lat, ur_lon, ur_lat = _bbox_around_point(lat, lon, HAZARD_RADIUS_KM)
+    # EONET expects minLon,minLat,maxLon,maxLat.
+    bbox = f"{ll_lon},{ll_lat},{ur_lon},{ur_lat}"
+    params = urllib.parse.urlencode({
+        "category": category,
+        "status": "open",
+        "days": days,
+        "limit": 100,
+        "bbox": bbox
+    })
+    try:
+        data = _request_json(f"{NASA_EONET_URL}/events?{params}", timeout=20)
+    except Exception as exc:
+        return {"events": [], "available": False, "status": f"NASA EONET unavailable: {exc}"}
 
-    found = {"flood": {}, "landslide": {}}
-    category_map = {"flood": "floods", "landslide": "landslides"}
-    for kind, category in category_map.items():
-        for point in points:
-            lat, lon = point["latitude"], point["longitude"]
-            # ~75 km search box around each route sample; 30-day window keeps it operationally relevant.
-            d = 0.75
-            bbox = f"{lon-d},{lat+d},{lon+d},{lat-d}"
-            params = urllib.parse.urlencode({
-                "category": category, "status": "all", "days": 30,
-                "limit": 50, "bbox": bbox
+    events = []
+    for event in data.get("events", []) if isinstance(data, dict) else []:
+        pt = _event_point(event)
+        if not pt:
+            continue
+        distance = haversine_km(lat, lon, pt[0], pt[1])
+        if distance <= HAZARD_RADIUS_KM:
+            events.append({
+                "id": event.get("id"),
+                "title": event.get("title"),
+                "description": event.get("description"),
+                "date": event.get("geometry", [{}])[-1].get("date") if event.get("geometry") else None,
+                "latitude": pt[0],
+                "longitude": pt[1],
+                "distance_km": round(distance, 2),
+                "link": event.get("link"),
+                "closed": event.get("closed")
             })
-            url = "https://eonet.gsfc.nasa.gov/api/v3/events?" + params
-            request = urllib.request.Request(url, headers={"User-Agent": "NER-Smart-Logistics-Prototype/1.0"})
-            try:
-                with urllib.request.urlopen(request, timeout=15) as response:
-                    events = json.loads(response.read().decode()).get("events", [])
-            except Exception:
-                continue
-            for event in events:
-                event_points = _geometry_points(event.get("geometry"))
-                distances = [_haversine_km(lat, lon, ep_lat, ep_lon) for ep_lat, ep_lon in event_points]
-                nearest = min(distances) if distances else None
-                eid = event.get("id") or event.get("title")
-                if eid and (eid not in found[kind] or (nearest is not None and nearest < found[kind][eid]["nearest_km"])):
-                    found[kind][eid] = {
-                        "id": event.get("id"),
-                        "title": event.get("title", "NASA EONET event"),
-                        "date": event.get("geometry", [{}])[-1].get("date") if event.get("geometry") else None,
-                        "open": event.get("closed") is None,
-                        "nearest_km": round(nearest, 1) if nearest is not None else None,
-                        "link": event.get("link")
-                    }
-    return {k: sorted(v.values(), key=lambda x: x["nearest_km"] if x["nearest_km"] is not None else 10**9)[:5] for k,v in found.items()}
+    events.sort(key=lambda x: x["distance_km"])
+    return {"events": events, "available": True, "status": "NASA live event feed"}
 
 
-def calculate_route_risk(route, weather_points, nasa_hazards):
-    max_rain = max((float(p.get("weather", {}).get("precipitation_mm", 0) or 0) for p in weather_points), default=0.0)
-    max_probability = max((float(p.get("weather", {}).get("rain_probability", 0) or 0) for p in weather_points), default=0.0)
-    floods = nasa_hazards.get("flood", [])
-    landslides = nasa_hazards.get("landslide", [])
-
-    score, reasons = 0, []
-    if max_rain >= 50: score += 35; reasons.append("Heavy rainfall forecast on sampled route points")
-    elif max_rain >= 25: score += 20; reasons.append("Moderate rainfall forecast on sampled route points")
-    elif max_rain >= 10: score += 10; reasons.append("Rainfall forecast on sampled route points")
-    if max_probability >= 80: score += 20; reasons.append("High precipitation probability")
-    elif max_probability >= 60: score += 10; reasons.append("Elevated precipitation probability")
-
-    def hazard_points(events, label):
-        nonlocal score
-        if not events: return
-        nearest = events[0].get("nearest_km")
-        if nearest is not None and nearest <= 20: score += 30
-        elif nearest is not None and nearest <= 50: score += 20
-        else: score += 10
-        reasons.append(f"NASA EONET reported {label} event(s) near the sampled route corridor")
-
-    hazard_points(floods, "flood")
-    hazard_points(landslides, "landslide")
-    if route.get("duration", 0)/3600 > 12:
-        score += 10; reasons.append("Long route duration")
-    score = min(score, 100)
-
-    def status(events, label):
-        if not events:
-            return f"No NASA EONET {label} event found within sampled route corridors in the last 30 days"
-        e = events[0]
-        return f"{len(events)} NASA EONET {label} event(s) found; nearest: {e.get('nearest_km')} km — {e.get('title')}"
-
+def get_route_nasa_hazards(route):
+    """Check flood and landslide events around route points; no invented probabilities."""
+    points = sample_route_points(route)
+    flood_events, landslide_events = {}, {}
+    for lat, lon in points:
+        flood = get_nasa_events_near_point(lat, lon, "floods", INCIDENT_LOOKBACK_DAYS)
+        landslide = get_nasa_events_near_point(lat, lon, "landslides", INCIDENT_LOOKBACK_DAYS)
+        for event in flood["events"]:
+            flood_events[event["id"]] = event
+        for event in landslide["events"]:
+            landslide_events[event["id"]] = event
     return {
-        "risk": "HIGH" if score >= 50 else "MEDIUM" if score >= 25 else "LOW",
-        "score": score,
-        "reasons": reasons or ["No major route-weather or nearby NASA event indicators detected"],
-        "rainfall_mm": round(max_rain, 2),
-        "rain_probability": round(max_probability, 2),
-        "flood_events": floods,
-        "landslide_events": landslides,
-        "flood_status": status(floods, "flood"),
-        "landslide_status": status(landslides, "landslide"),
-        "data_sources": ["Open-Meteo forecast", "NASA EONET v3 recent natural-event metadata"],
-        "election_probability": None, "riot_probability": None, "bridge_broken_probability": None,
-        "election_status": "No live election feed connected",
-        "riot_status": "No live incident feed connected",
-        "bridge_broken_status": "No live bridge-condition feed connected"
+        "radius_km": HAZARD_RADIUS_KM,
+        "flood": sorted(flood_events.values(), key=lambda x: x["distance_km"]),
+        "landslide": sorted(landslide_events.values(), key=lambda x: x["distance_km"]),
+        "source": "NASA EONET v3 near-real-time event metadata"
     }
+
+
+def _road_keys(route):
+    keys = []
+    for leg in route.get("legs", []):
+        for step in leg.get("steps", []):
+            ref = (step.get("ref") or "").strip()
+            name = (step.get("name") or "").strip()
+            if ref:
+                keys.append(f"ref:{ref}")
+            elif name:
+                keys.append(f"name:{name.lower()}")
+    return list(dict.fromkeys(keys))
 
 
 def get_route_road_names(route):
@@ -1300,76 +1142,383 @@ def get_route_road_names(route):
         for step in leg.get("steps", []):
             name = (step.get("name") or "").strip()
             ref = (step.get("ref") or "").strip()
-            if ref and ref not in refs: refs.append(ref)
-            if name and name not in names: names.append(name)
-    # Keep the UI useful: show major corridor identifiers, not every local turn.
-    display_parts = refs[:6] if refs else names[:4]
+            if name and name not in names:
+                names.append(name)
+            if ref and ref not in refs:
+                refs.append(ref)
     return {
-        "road_names": names[:12],
-        "road_refs": refs[:12],
-        "display_name": " → ".join(display_parts) if display_parts else "Road name unavailable"
+        "road_names": names,
+        "road_refs": refs,
+        "display_name": " / ".join(refs + names) if refs or names else "Road name unavailable"
     }
 
-# =========================================================
-# RISK ANALYSIS
-# =========================================================
-@app.get("/shipments/{shipment_id}/risk")
-def shipment_risk(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
-    if not authorization: raise HTTPException(status_code=401, detail="Login required")
-    token = authorization.replace("Bearer ", "").strip()
-    if token in active_driver_tokens:
-        driver_id = get_driver_from_token(token)
-        if not db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id == shipment_id, DriverAssignmentDB.driver_username == driver_id).first():
-            raise HTTPException(status_code=403, detail="Shipment is not assigned to this driver")
-    else:
-        user = get_current_user(token)
-        if user.get("role") not in ("dealer", "user"): raise HTTPException(status_code=403, detail="Not authorized")
-    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
-    if not shipment: raise HTTPException(status_code=404, detail="Shipment not found")
-    status = (shipment.status or "pending").strip().lower()
-    score = {"pending":10,"in transit":20,"delayed":75,"shipment altered":60,"altered":60,"delivered":0}.get(status,15)
-    reason = {"pending":"Shipment is still pending","in transit":"Shipment is currently in transit","delayed":"Shipment has been marked Delayed","shipment altered":"Shipment has been marked Shipment Altered","altered":"Shipment has been marked Shipment Altered","delivered":"Shipment has been delivered"}.get(status, f"Current shipment status: {shipment.status}")
-    return {"shipment_id":shipment_id,"status":shipment.status,"risk":"HIGH" if score>=70 else "MEDIUM" if score>=35 else "LOW","score":score,"reasons":[reason],"note":"Shipment-condition risk only. Route/weather and NASA event intelligence is shown in Route Intelligence."}
 
-# =========================================================
-# ROUTE INTELLIGENCE ENDPOINT
-# =========================================================
-@app.get("/shipments/{shipment_id}/route-intelligence")
-def route_intelligence(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
-    if not authorization: raise HTTPException(status_code=401, detail="Login required")
-    token = authorization.replace("Bearer ", "").strip()
-    if token in active_driver_tokens:
-        driver_id = get_driver_from_token(token)
-        if not db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id == shipment_id, DriverAssignmentDB.driver_username == driver_id).first():
-            raise HTTPException(status_code=403, detail="Shipment is not assigned to this driver")
-    else:
-        user = get_current_user(token)
-        if user.get("role") not in ("dealer", "user"): raise HTTPException(status_code=403, detail="Not authorized")
-    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
-    if not shipment: raise HTTPException(status_code=404, detail="Shipment not found")
+def get_learning_stats(db, route):
+    stats = []
+    for key in _road_keys(route):
+        row = db.query(RoadLearningDB).filter(RoadLearningDB.road_key == key).first()
+        if row:
+            stats.append(row)
+    observations = sum((x.observations or 0) for x in stats)
+    incidents = sum((x.incident_reports or 0) for x in stats)
+    blocked = sum((x.blocked_reports or 0) for x in stats)
+    delays = sum((x.delay_minutes_total or 0.0) for x in stats)
+    passes = sum((x.successful_passes or 0) for x in stats)
+    incident_rate = (incidents / observations * 100.0) if observations else 0.0
+    blocked_rate = (blocked / observations * 100.0) if observations else 0.0
+    avg_delay = (delays / passes) if passes else 0.0
+    return {
+        "observations": observations,
+        "incident_reports": incidents,
+        "blocked_reports": blocked,
+        "successful_passes": passes,
+        "learned_incident_rate": round(incident_rate, 2),
+        "learned_blocked_rate": round(blocked_rate, 2),
+        "learned_average_delay_minutes": round(avg_delay, 2)
+    }
 
-    origin = geocode_location(shipment.origin)
+
+def calculate_dynamic_route_score(route, weather, hazards, db):
+    duration = float(route.get("duration", 0)) / 60.0
+    risk = 0.0
+    reasons = []
+
+    rain = max([float(x.get("weather", {}).get("rain_probability", 0) or 0) for x in weather] or [0])
+    rainfall = max([float(x.get("weather", {}).get("precipitation_mm", 0) or 0) for x in weather] or [0])
+    flood_count = len(hazards.get("flood", []))
+    landslide_count = len(hazards.get("landslide", []))
+
+    if rainfall >= 50:
+        risk += 25; reasons.append("heavy rainfall forecast")
+    elif rainfall >= 25:
+        risk += 12; reasons.append("moderate rainfall forecast")
+    if rain >= 80:
+        risk += 15; reasons.append("high precipitation probability")
+    elif rain >= 60:
+        risk += 8; reasons.append("elevated precipitation probability")
+    if flood_count:
+        risk += min(35, 15 + 5 * min(flood_count, 4)); reasons.append(f"{flood_count} NASA flood event(s) within 50 km")
+    if landslide_count:
+        risk += min(35, 15 + 5 * min(landslide_count, 4)); reasons.append(f"{landslide_count} NASA landslide event(s) within 50 km")
+
+    learning = get_learning_stats(db, route)
+    risk += min(25, learning["learned_incident_rate"] * 0.5)
+    risk += min(30, learning["learned_blocked_rate"] * 0.8)
+    risk += min(20, learning["learned_average_delay_minutes"] * 0.2)
+    if learning["observations"]:
+        reasons.append("historical road observations included in AI decision")
+
+    blocked_incidents = []
+    coords = route_coordinates(route)
+    recent = db.query(RouteIncidentDB).filter(
+        RouteIncidentDB.active == True,
+        RouteIncidentDB.created_at >= datetime.utcnow() - timedelta(days=INCIDENT_LOOKBACK_DAYS)
+    ).all()
+    for inc in recent:
+        distance = point_to_route_distance_km(inc.latitude, inc.longitude, coords)
+        if distance <= INCIDENT_ROUTE_PROXIMITY_KM:
+            blocked_incidents.append(inc)
+            sev = (inc.severity or "medium").lower()
+            risk += {"high": 45, "critical": 60, "medium": 20, "low": 5}.get(sev, 15)
+    if blocked_incidents:
+        reasons.append(f"{len(blocked_incidents)} recent driver/user incident report(s) on/near route")
+
+    effective_minutes = duration + min(180, risk * 1.5)
+    if blocked_incidents:
+        effective_minutes += 180
+
+    return {
+        "risk_score": round(min(100, risk), 1),
+        "risk": "HIGH" if risk >= 55 else "MEDIUM" if risk >= 30 else "LOW",
+        "effective_minutes": round(effective_minutes, 1),
+        "rain_probability": round(rain, 1),
+        "rainfall_mm": round(rainfall, 2),
+        "flood_events": hazards.get("flood", []),
+        "landslide_events": hazards.get("landslide", []),
+        "nearby_incidents": [
+            {"id": x.id, "type": x.incident_type, "severity": x.severity, "road_ref": x.road_ref,
+             "road_name": x.road_name, "description": x.description, "latitude": x.latitude,
+             "longitude": x.longitude, "created_at": x.created_at}
+            for x in blocked_incidents
+        ],
+        "learning": learning,
+        "reasons": reasons or ["No current hazard or incident signal detected"]
+    }
+
+
+def build_route_analysis(shipment, db, start_lat=None, start_lon=None, persist_decision=False):
+    if start_lat is None or start_lon is None:
+        origin = geocode_location(shipment.origin)
+        start_lat, start_lon = origin["latitude"], origin["longitude"]
+        origin_coordinates = origin
+    else:
+        origin_coordinates = {"latitude": start_lat, "longitude": start_lon, "display_name": "Driver's last updated location"}
     destination = geocode_location(shipment.destination)
-    routes = get_routes(origin["latitude"], origin["longitude"], destination["latitude"], destination["longitude"])
-    out = []
+    routes = get_routes(start_lat, start_lon, destination["latitude"], destination["longitude"])
+    analysed = []
     for i, route in enumerate(routes):
         roads = get_route_road_names(route)
-        weather_points = sample_route_weather(route)
-        nasa_hazards = get_nasa_eonet_hazards(route)
-        risk = calculate_route_risk(route, weather_points, nasa_hazards)
-        out.append({
-            "route_number": i+1,
+        weather = sample_route_weather(route)
+        hazards = get_route_nasa_hazards(route)
+        decision = calculate_dynamic_route_score(route, weather, hazards, db)
+        signature = hashlib.sha256(("|".join(_road_keys(route)) + f"|{round(route.get('distance',0)/1000,1)}").encode()).hexdigest()[:16]
+        analysed.append({
+            "route_number": i + 1,
             "route_name": roads["display_name"],
             "road_names": roads["road_names"],
             "road_refs": roads["road_refs"],
-            "distance_km": round(route["distance"]/1000, 2),
-            "duration_minutes": round(route["duration"]/60, 1),
-            "risk": risk,
-            "weather_points": weather_points,
+            "road_steps": build_road_steps(route),
+            "distance_km": round(route["distance"] / 1000, 2),
+            "duration_minutes": round(route["duration"] / 60, 1),
+            "risk": decision,
+            "route_signature": signature,
             "geometry": route.get("geometry")
         })
-    out.sort(key=lambda x: (x["risk"]["score"], x["duration_minutes"]))
-    for rank, item in enumerate(out, 1): item["rank"] = rank
-    return {"shipment_id":shipment_id,"origin":shipment.origin,"destination":shipment.destination,
-            "origin_coordinates":origin,"destination_coordinates":destination,
-            "recommended_route":out[0],"routes":out}
+
+    # AI decision: prioritize accessibility/safety, then ETA. A clear 3-min route can beat a blocked 2-min route.
+    analysed.sort(key=lambda x: (x["risk"]["effective_minutes"], x["duration_minutes"]))
+    for rank, item in enumerate(analysed, 1):
+        item["rank"] = rank
+        item["recommended"] = rank == 1
+
+    recommended = analysed[0]
+    if persist_decision:
+        previous = db.query(RouteDecisionDB).filter(RouteDecisionDB.shipment_id == shipment.shipment_id).order_by(RouteDecisionDB.id.desc()).first()
+        reason = "; ".join(recommended["risk"]["reasons"][:3])
+        db.add(RouteDecisionDB(
+            shipment_id=shipment.shipment_id,
+            origin_lat=origin_coordinates["latitude"], origin_lon=origin_coordinates["longitude"],
+            current_lat=start_lat, current_lon=start_lon, destination=shipment.destination,
+            selected_signature=recommended["route_signature"], selected_route_name=recommended["route_name"],
+            selected_distance_km=recommended["distance_km"], selected_duration_minutes=recommended["duration_minutes"],
+            reason=reason
+        ))
+        db.commit()
+        return _attach_recheck_state(analysed, previous, recommended, shipment.shipment_id, start_lat, start_lon, destination)
+
+    return {
+        "shipment_id": shipment.shipment_id,
+        "origin": shipment.origin,
+        "destination": shipment.destination,
+        "origin_coordinates": origin_coordinates,
+        "destination_coordinates": destination,
+        "current_coordinates": {"latitude": start_lat, "longitude": start_lon},
+        "recommended_route": recommended,
+        "routes": analysed,
+        "hazard_radius_km": HAZARD_RADIUS_KM,
+        "ai": {
+            "name": "Dynamic Route Decision AI",
+            "decision_basis": ["current route ETA", "NASA live natural-event signals", "weather", "driver/user geo-tagged incidents", "learned road history"],
+            "note": "The system does not invent flood/landslide probabilities. NASA events are shown as detected events; learned road signals come from stored observations/reports."
+        },
+        "data_sources": {
+            "weather": "Open-Meteo",
+            "natural_hazards": "NASA EONET v3 near-real-time event metadata",
+            "routing": "OpenStreetMap / OSRM"
+        }
+    }
+
+
+def _attach_recheck_state(analysed, previous, recommended, shipment_id, lat, lon, destination):
+    return {
+        "shipment_id": shipment_id,
+        "current_coordinates": {"latitude": lat, "longitude": lon},
+        "destination_coordinates": destination,
+        "recommended_route": recommended,
+        "routes": analysed,
+        "hazard_radius_km": HAZARD_RADIUS_KM,
+        "route_changed": bool(previous and previous.selected_signature != recommended["route_signature"]),
+        "previous_route": {
+            "signature": previous.selected_signature,
+            "route_name": previous.selected_route_name,
+            "distance_km": previous.selected_distance_km,
+            "duration_minutes": previous.selected_duration_minutes,
+            "created_at": previous.created_at
+        } if previous else None
+    }
+
+
+def build_road_steps(route):
+    steps = []
+    seen = set()
+    for leg in route.get("legs", []):
+        for step in leg.get("steps", []):
+            name = (step.get("name") or "").strip()
+            ref = (step.get("ref") or "").strip()
+            label = ref or name
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            steps.append({"ref": ref or None, "name": name or None, "road": label})
+    return steps
+
+
+def _authorise_shipment(db, shipment_id, authorization):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Login required")
+    token = authorization.replace("Bearer ", "").strip()
+    if token in active_driver_tokens:
+        driver_id = get_driver_from_token(token)
+        allowed = db.query(DriverAssignmentDB).filter(
+            DriverAssignmentDB.shipment_id == shipment_id,
+            DriverAssignmentDB.driver_username == driver_id
+        ).first()
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Shipment is not assigned to this driver")
+        return {"role": "driver", "username": driver_id}
+    user = get_current_user(token)
+    if user.get("role") not in ("dealer", "user"):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
+    if not shipment or shipment.owner_username != user["username"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return user
+
+
+@app.get("/shipments/{shipment_id}/risk")
+def shipment_risk(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    _authorise_shipment(db, shipment_id, authorization)
+    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    status = (shipment.status or "pending").strip().lower()
+    score = {"pending": 10, "in transit": 20, "delayed": 75, "shipment altered": 60, "altered": 60, "delivered": 0}.get(status, 15)
+    return {"shipment_id": shipment_id, "status": shipment.status, "risk": "HIGH" if score >= 70 else "MEDIUM" if score >= 35 else "LOW", "score": score,
+            "reasons": [f"Current shipment status: {shipment.status}"], "note": "Shipment-condition risk only. Dynamic route risk is handled by Route Intelligence."}
+
+
+@app.get("/shipments/{shipment_id}/route-intelligence")
+def route_intelligence(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    _authorise_shipment(db, shipment_id, authorization)
+    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    # Driver routing starts from last GPS; dealer routing starts from shipment origin.
+    latest = db.query(GPSLocationDB).filter(GPSLocationDB.shipment_id == shipment_id).order_by(GPSLocationDB.id.desc()).first()
+    if latest:
+        return build_route_analysis(shipment, db, latest.latitude, latest.longitude)
+    return build_route_analysis(shipment, db)
+
+
+@app.get("/shipments/{shipment_id}/recheck-route")
+def recheck_route(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    user = _authorise_shipment(db, shipment_id, authorization)
+    if user.get("role") != "driver":
+        raise HTTPException(status_code=403, detail="Recheck Route is a driver operation")
+    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
+    latest = db.query(GPSLocationDB).filter(GPSLocationDB.shipment_id == shipment_id).order_by(GPSLocationDB.id.desc()).first()
+    if not shipment or not latest:
+        raise HTTPException(status_code=400, detail="A latest driver GPS location is required before route recheck")
+    return build_route_analysis(shipment, db, latest.latitude, latest.longitude, persist_decision=True)
+
+
+class RouteIncidentRequest(BaseModel):
+    shipment_id: str | None = None
+    latitude: float
+    longitude: float
+    incident_type: str
+    severity: str = "medium"
+    road_ref: str | None = None
+    road_name: str | None = None
+    description: str | None = None
+    photo_url: str | None = None
+
+
+@app.post("/route-incidents")
+def report_route_incident(data: RouteIncidentRequest, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Login required")
+    token = authorization.replace("Bearer ", "").strip()
+    if token in active_driver_tokens:
+        reporter = get_driver_from_token(token)
+        role = "driver"
+    else:
+        user = get_current_user(token)
+        reporter, role = user["username"], user.get("role")
+    if data.shipment_id:
+        _authorise_shipment(db, data.shipment_id, authorization)
+    incident = RouteIncidentDB(
+        shipment_id=data.shipment_id, reporter_username=reporter, latitude=data.latitude, longitude=data.longitude,
+        incident_type=data.incident_type.strip(), severity=data.severity.strip().lower(), road_ref=data.road_ref,
+        road_name=data.road_name, description=data.description, photo_url=data.photo_url, active=True
+    )
+    db.add(incident)
+    # Online learning update: reports increase the learned incident/blockage history for the named road.
+    if data.road_ref or data.road_name:
+        key = f"ref:{data.road_ref}" if data.road_ref else f"name:{data.road_name.lower()}"
+        row = db.query(RoadLearningDB).filter(RoadLearningDB.road_key == key).first()
+        if not row:
+            row = RoadLearningDB(road_key=key)
+            db.add(row)
+        row.observations = (row.observations or 0) + 1
+        row.incident_reports = (row.incident_reports or 0) + 1
+        if data.severity.lower() in ("high", "critical") or "block" in data.incident_type.lower():
+            row.blocked_reports = (row.blocked_reports or 0) + 1
+        row.last_observed_at = datetime.utcnow()
+    db.commit(); db.refresh(incident)
+    return {"message": "Route incident recorded", "incident_id": incident.id, "learning_updated": bool(data.road_ref or data.road_name), "role": role}
+
+
+@app.get("/route-incidents/nearby")
+def nearby_route_incidents(latitude: float, longitude: float, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Login required")
+    token = authorization.replace("Bearer ", "").strip()
+    if token not in active_driver_tokens:
+        get_current_user(token)
+    rows = db.query(RouteIncidentDB).filter(
+        RouteIncidentDB.active == True,
+        RouteIncidentDB.created_at >= datetime.utcnow() - timedelta(days=INCIDENT_LOOKBACK_DAYS)
+    ).all()
+    result = []
+    for x in rows:
+        d = haversine_km(latitude, longitude, x.latitude, x.longitude)
+        if d <= HAZARD_RADIUS_KM:
+            result.append({"id": x.id, "type": x.incident_type, "severity": x.severity, "road_ref": x.road_ref, "road_name": x.road_name, "description": x.description, "distance_km": round(d,2), "created_at": x.created_at})
+    result.sort(key=lambda x: x["distance_km"])
+    return {"radius_km": HAZARD_RADIUS_KM, "incidents": result}
+
+
+@app.get("/shipments/{shipment_id}/ai-disruption-prediction")
+def ai_disruption_prediction(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    """Compatibility endpoint: the old arbitrary IsolationForest score is gone.
+
+    This endpoint now exposes the actual Dynamic Route Decision AI used by routing.
+    """
+    _authorise_shipment(db, shipment_id, authorization)
+    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    latest = db.query(GPSLocationDB).filter(GPSLocationDB.shipment_id == shipment_id).order_by(GPSLocationDB.id.desc()).first()
+    analysis = build_route_analysis(shipment, db, latest.latitude, latest.longitude) if latest else build_route_analysis(shipment, db)
+    return {
+        "shipment_id": shipment_id,
+        "model": "Dynamic Route Decision AI",
+        "model_type": "online/adaptive route scoring",
+        "recommended_route": analysis["recommended_route"],
+        "route_predictions": analysis["routes"],
+        "learning": ["geo-tagged incident reports", "historical road observations", "current route conditions"],
+        "note": "This replaces the previous standalone anomaly score. The AI's output is the route decision itself."
+    }
+
+
+@app.get("/shipments/{shipment_id}/route-alert")
+def route_alert(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    user = _authorise_shipment(db, shipment_id, authorization)
+    if user.get("role") != "driver":
+        raise HTTPException(status_code=403, detail="Driver access required")
+    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
+    latest = db.query(GPSLocationDB).filter(GPSLocationDB.shipment_id == shipment_id).order_by(GPSLocationDB.id.desc()).first()
+    previous = db.query(RouteDecisionDB).filter(RouteDecisionDB.shipment_id == shipment_id).order_by(RouteDecisionDB.id.desc()).first()
+    if not shipment or not latest:
+        return {"alert": False, "message": "No GPS position available yet"}
+    analysis = build_route_analysis(shipment, db, latest.latitude, latest.longitude)
+    rec = analysis["recommended_route"]
+    changed = bool(previous and previous.selected_signature != rec["route_signature"])
+    incident = bool(rec["risk"].get("nearby_incidents"))
+    return {
+        "alert": changed or incident,
+        "reason": "Route conditions changed ahead" if changed else "New incident detected on/near current route" if incident else "No route change detected",
+        "recommended_route": rec,
+        "current_coordinates": analysis["current_coordinates"]
+    }
