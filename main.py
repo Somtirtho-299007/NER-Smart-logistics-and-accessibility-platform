@@ -1,3 +1,20 @@
+
+
+Skip to content
+Using Gmail with screen readers
+Enable desktop notifications for Gmail.
+   OK  No thanks
+1 of 270
+(no subject)
+Inbox
+
+Somtirtho Banerjee <somtirthobanerjee16@gmail.com>
+Attachments
+Sat, Sep 5, 8:37 AM (1 day ago)
+to me
+
+ 4 Attachments
+  •  Scanned by Gmail
 from fastapi import FastAPI, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -345,15 +362,35 @@ def register_user(
 # ---------------------------------------------------------
 
 def get_current_user(token: str):
-
     if token not in sessions:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired session"
-        )
-
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
     return sessions[token]
+
+def get_current_principal(authorization: str | None):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Login required")
+    token = authorization.replace("Bearer ", "").strip()
+    if token in active_driver_tokens:
+        driver_id = get_driver_from_token(token)
+        return {"type": "driver", "username": driver_id, "role": "driver"}
+    user = get_current_user(token)
+    return {"type": "user", "username": user["username"], "role": user.get("role", "dealer")}
+
+def require_shipment_access(shipment_id: str, authorization: str | None, db: Session):
+    principal = get_current_principal(authorization)
+    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
+    if not shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    if principal["type"] == "driver":
+        assigned = db.query(DriverAssignmentDB).filter(
+            DriverAssignmentDB.shipment_id == shipment_id,
+            DriverAssignmentDB.driver_username == principal["username"]
+        ).first()
+        if not assigned:
+            raise HTTPException(status_code=403, detail="Shipment is not assigned to this driver")
+    elif shipment.owner_username != principal["username"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return shipment, principal
 
 
 # ---------------------------------------------------------
@@ -440,27 +477,9 @@ def get_shipments(
 # ---------------------------------------------------------
 
 @app.get("/shipments/{shipment_id}")
-def get_shipment(
-    shipment_id: str,
-    db: Session = Depends(get_db)
-):
-
-    shipment = db.query(ShipmentDB).filter(
-        ShipmentDB.shipment_id == shipment_id
-    ).first()
-
-
-    if not shipment:
-
-        return {
-            "message": "Shipment not found"
-        }
-
-
-    return {
-        "shipment": shipment
-    }
-
+def get_shipment(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    shipment, _ = require_shipment_access(shipment_id, authorization, db)
+    return {"shipment": {"shipment_id": shipment.shipment_id, "origin": shipment.origin, "destination": shipment.destination, "weight": shipment.weight, "cargo": shipment.cargo, "status": shipment.status, "owner_username": shipment.owner_username}}
 
 # ---------------------------------------------------------
 # UPDATE SHIPMENT
@@ -508,38 +527,15 @@ def update_shipment(
 # ---------------------------------------------------------
 
 @app.delete("/shipments/{shipment_id}")
-def delete_shipment(
-
-    shipment_id: str,
-
-    db: Session = Depends(get_db)
-
-):
-
-    existing_shipment = db.query(
-        ShipmentDB
-    ).filter(
-        ShipmentDB.shipment_id == shipment_id
-    ).first()
-
-
-    if not existing_shipment:
-
-        return {
-            "message": "Shipment not found"
-        }
-
-
-    db.delete(existing_shipment)
-
-    db.commit()
-
-
-    return {
-
-        "message": "Shipment deleted successfully"
-    }
-
+def delete_shipment(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    shipment, principal = require_shipment_access(shipment_id, authorization, db)
+    if principal["type"] == "driver":
+        raise HTTPException(status_code=403, detail="Drivers cannot delete shipments")
+    db.query(TrackingEventDB).filter(TrackingEventDB.shipment_id == shipment_id).delete(synchronize_session=False)
+    db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id == shipment_id).delete(synchronize_session=False)
+    db.query(GPSLocationDB).filter(GPSLocationDB.shipment_id == shipment_id).delete(synchronize_session=False)
+    db.delete(shipment); db.commit()
+    return {"message": "Shipment deleted successfully"}
 
 # =========================================================
 # TRACKING
@@ -547,28 +543,10 @@ def delete_shipment(
 
 
 @app.get("/shipments/{shipment_id}/tracking")
-def get_tracking_history(
-
-    shipment_id: str,
-
-    db: Session = Depends(get_db)
-
-):
-
-    events = db.query(
-        TrackingEventDB
-    ).filter(
-        TrackingEventDB.shipment_id == shipment_id
-    ).all()
-
-
-    return {
-
-        "tracking_history": events
-    }
-
-
-
+def get_tracking_history(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
+    require_shipment_access(shipment_id, authorization, db)
+    events = db.query(TrackingEventDB).filter(TrackingEventDB.shipment_id == shipment_id).all()
+    return {"tracking_history": [{"id": e.id, "shipment_id": e.shipment_id, "status": e.status, "location": e.location} for e in events]}
 
 # =========================================================
 # DRIVER ASSIGNMENT
@@ -579,12 +557,12 @@ def get_tracking_history(
 def assign_driver(
     shipment_id: str,
     data: AssignmentRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None)
 ):
-
-    shipment = db.query(ShipmentDB).filter(
-        ShipmentDB.shipment_id == shipment_id
-    ).first()
+    shipment, principal = require_shipment_access(shipment_id, authorization, db)
+    if principal["type"] == "driver":
+        raise HTTPException(status_code=403, detail="Drivers cannot assign drivers")
 
     if not shipment:
         raise HTTPException(
@@ -1409,3 +1387,5 @@ def route_intelligence(shipment_id: str, db: Session = Depends(get_db), authoriz
     return {"shipment_id":shipment_id,"origin":shipment.origin,"destination":shipment.destination,
             "origin_coordinates":origin,"destination_coordinates":destination,
             "recommended_route":out[0],"routes":out}
+main_fixed.py
+Displaying main_fixed.py.
