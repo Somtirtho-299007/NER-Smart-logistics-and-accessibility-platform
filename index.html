@@ -594,7 +594,7 @@ button:hover {
 </div>
 
 <script>
-const API="http://127.0.0.1:8000";
+const API="https://ner-smart-logistics-and-accessibility.onrender.com";
 const originalFetch=window.fetch.bind(window);
 async function authFetch(url,options={}){const token=localStorage.getItem("token");if(!token)throw new Error("Not logged in");options.headers={...(options.headers||{}),Authorization:"Bearer "+token};return originalFetch(url,options);}
 function hideEverything(){["loginPage","registerPage","userDashboard","driverDashboard"].forEach(id=>document.getElementById(id).classList.add("hidden"));}
