@@ -587,8 +587,137 @@ function hideEverything(){["loginPage","registerPage","userDashboard","driverDas
 function showLogin(){hideEverything();document.getElementById("loginPage").classList.remove("hidden");}
 function showRegister(){hideEverything();document.getElementById("registerPage").classList.remove("hidden");}
 function updateRegisterFields(){const t=document.getElementById("registerType").value;document.getElementById("registerUsername").placeholder=t==="driver"?"Driver ID":"Username";}
-async function registerUser(){const t=document.getElementById("registerType").value,u=document.getElementById("registerUsername").value.trim(),p=document.getElementById("registerPassword").value,m=document.getElementById("registerMessage");if(!u||!p){m.innerText="Enter all fields.";return;}try{const r=await originalFetch(t==="driver"?API+"/driver/register":API+"/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(t==="driver"?{driver_id:u,password:p}:{username:u,password:p})}),d=await r.json();if(!r.ok)throw new Error(d.detail||"Registration failed");m.innerText="Registration successful. Please login.";m.className="success";}catch(e){m.innerText=e.message;m.className="error";}}
-async function login(){const t=document.getElementById("loginType").value,u=document.getElementById("loginUsername").value.trim(),p=document.getElementById("loginPassword").value,m=document.getElementById("loginMessage");if(!u||!p){m.innerText="Enter your credentials.";return;}try{const r=await originalFetch(t==="driver"?API+"/driver/login":API+"/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(t==="driver"?{driver_id:u,password:p}:{username:u,password:p})}),d=await r.json();if(!r.ok)throw new Error(d.detail||"Login failed");localStorage.setItem("token",d.token);if(t==="driver"){localStorage.setItem("role","driver");localStorage.setItem("driver_id",d.driver_id);showDriverDashboard();}else{localStorage.setItem("role",d.role||"dealer");localStorage.setItem("username",d.username||u);showUserDashboard();}}catch(e){m.innerText=e.message;m.className="error";}}
+async function registerUser() {
+    const t = document.getElementById("registerType").value;
+    const u = document.getElementById("registerUsername").value.trim();
+    const p = document.getElementById("registerPassword").value;
+    const m = document.getElementById("registerMessage");
+
+    if (!u || !p) {
+        m.innerText = "Enter all fields.";
+        return;
+    }
+
+    try {
+        const r = await originalFetch(
+            t === "driver"
+                ? API + "/driver/register"
+                : API + "/register",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(
+                    t === "driver"
+                        ? {
+                            driver_id: u,
+                            password: p
+                        }
+                        : {
+                            username: u,
+                            password: p
+                        }
+                )
+            }
+        );
+
+        const text = await r.text();
+
+        let d = {};
+
+        try {
+            d = text ? JSON.parse(text) : {};
+        } catch {
+            throw new Error(
+                "Server returned an invalid response: " + text
+            );
+        }
+
+        if (!r.ok) {
+            throw new Error(
+                d.detail || d.message || "Registration failed"
+            );
+        }
+
+        m.innerText = "Registration successful. Please login.";
+        m.className = "success";
+
+    } catch (e) {
+        m.innerText = e.message;
+        m.className = "error";
+    }
+}
+async function login() {
+    const t = document.getElementById("loginType").value;
+    const u = document.getElementById("loginUsername").value.trim();
+    const p = document.getElementById("loginPassword").value;
+    const m = document.getElementById("loginMessage");
+
+    if (!u || !p) {
+        m.innerText = "Enter your credentials.";
+        return;
+    }
+
+    try {
+        const r = await originalFetch(
+            t === "driver"
+                ? API + "/driver/login"
+                : API + "/login",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(
+                    t === "driver"
+                        ? {
+                            driver_id: u,
+                            password: p
+                        }
+                        : {
+                            username: u,
+                            password: p
+                        }
+                )
+            }
+        );
+
+        const text = await r.text();
+
+        let d = {};
+
+        try {
+            d = text ? JSON.parse(text) : {};
+        } catch {
+            throw new Error(
+                "Server returned an invalid response: " + text
+            );
+        }
+
+        if (!r.ok) {
+            throw new Error(
+                d.detail || d.message || "Login failed"
+            );
+        }
+
+        localStorage.setItem("token", d.token);
+
+        if (t === "driver") {
+            localStorage.setItem("role", "driver");
+            localStorage.setItem("driver_id", d.driver_id);
+            showDriverDashboard();
+        } else {
+            localStorage.setItem("role", d.role || "dealer");
+            localStorage.setItem("username", d.username || u);
+            showUserDashboard();
+        }
+
+    } catch (e) {
+        m.innerText = e.message;
+        m.className = "error";
+    }
+}
 function logout(){["token","role","username","driver_id"].forEach(k=>localStorage.removeItem(k));showLogin();}
 async function showUserDashboard(){hideEverything();document.getElementById("userDashboard").classList.remove("hidden");document.getElementById("userWelcome").innerText="Logged in as: "+(localStorage.getItem("username")||"");await loadShipments();}
 async function showDriverDashboard(){hideEverything();document.getElementById("driverDashboard").classList.remove("hidden");document.getElementById("driverWelcome").innerText="Driver ID: "+(localStorage.getItem("driver_id")||"");await loadDriverShipments();}
