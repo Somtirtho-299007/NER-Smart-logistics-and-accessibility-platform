@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>NER Smart Logistics</title>
+
+<style>
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: Arial, sans-serif;
+}
+
+body {
+    background: #f4f6f8;
+    color: #222;
+}
+
+header {
+    background: #17202a;
+    color: white;
+    padding: 22px;
+    text-align: center;
+}
+
+header h1 {
+    margin-bottom: 6px;
+}
+
+.container {
+    width: 92%;
+    max-width: 1200px;
+    margin: 30px auto;
+}
+
+.hidden {
+    display: none !important;
+}
+
+.auth-box {
+    width: 400px;
+    max-width: 95%;
+    margin: 60px auto;
+    background: white;
+    padding: 30px;
+    border-radius: 12px;
+    box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+}
+
+.auth-box h2 {
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+input, select {
+    width: 100%;
+    padding: 11px;
+    margin: 7px 0;
+    border: 1px solid #ccc;
+    border-radius: 7px;
+}
+
+button {
+    padding: 10px 16px;
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    background: #1976d2;
+    color: white;
+    margin: 5px 0;
+}
+
+button:hover {
+    opacity: 0.9;
+}
+
+.secondary {
+    background: #555;
+}
+
+.danger-btn {
+    background: #c62828;
+}
+
+.success {
+    color: green;
+}
+
+.error {
+    color: red;
+}
+
+.auth-switch {
+    margin-top: 15px;
+    text-align: center;
+}
+
+.auth-switch button {
+    background: none;
+    color: #1976d2;
+    padding: 0;
+}
+
+.dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 15px;
+    margin-bottom: 25px;
+}
+
+.card {
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+}
+
+.card h3 {
+    color: #555;
+    margin-bottom: 10px;
+}
+
+.card p {
+    font-size: 28px;
+    font-weight: bold;
+}
+
+.panel {
+    background: white;
+    padding: 25px;
+    margin-bottom: 20px;
+    border-radius: 10px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+}
+
+.panel h2 {
+    margin-bottom: 18px;
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px;
+}
+
+.shipment {
+    border: 1px solid #ddd;
+    padding: 15px;
+    margin: 10px 0;
+    border-radius: 8px;
+}
+
+.shipment strong {
+    font-size: 18px;
+}
+
+.result {
+    background: #f1f3f5;
+    padding: 15px;
+    border-radius: 8px;
+    margin-top: 12px;
+    white-space: pre-wrap;
+}
+
+.topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.status {
+    padding: 5px 10px;
+    border-radius: 20px;
+    background: #eee;
+    display: inline-block;
+}
+
+.driver-card {
+    border: 1px solid #ddd;
+    padding: 12px;
+    border-radius: 8px;
+    margin: 8px 0;
+}
+
+@media(max-width:600px) {
+    .auth-box {
+        margin-top: 30px;
+    }
+}
+</style>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>#routeMap{height:430px;margin-top:15px;border:1px solid #ddd;border-radius:10px}.route-card{border:1px solid #ddd;padding:15px;margin:10px 0;border-radius:8px}.risk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:10px}.risk-item{background:#f7f8fa;padding:10px;border-radius:7px}</style>
+</head>
+
+<body>
+
+<header>
+    <h1>NER Smart Logistics</h1>
+    <p>Smart Logistics & Accessibility Intelligence Platform</p>
+</header>
+
+<!-- =====================================================
+     LOGIN
+===================================================== -->
+
+<div id="loginPage" class="auth-box">
+
+    <h2>Login</h2>
+
+    <select id="loginType">
+        <option value="user">User / Dealer</option>
+        <option value="driver">Driver</option>
+    </select>
+
+    <input
+        id="loginUsername"
+        placeholder="Username / Driver ID"
+    >
+
+    <input
+        id="loginPassword"
+        type="password"
+        placeholder="Password"
+    >
+
+    <button onclick="login()" style="width:100%">
+        Login
+    </button>
+
+    <p id="loginMessage"></p>
+
+    <div class="auth-switch">
+        Don't have a user account?
+        <button onclick="showRegister()">
+            Create User Account
+        </button>
+    </div>
+
+</div>
+
+<!-- =====================================================
+     USER REGISTER
+===================================================== -->
+
+<div id="registerPage" class="auth-box hidden">
+<h2>Create Account</h2>
+<select id="registerType" onchange="updateRegisterFields()"><option value="user">User / Dealer</option><option value="driver">Driver</option></select>
+
+    <input
+        id="registerUsername"
+        placeholder="Username"
+    >
+
+    <input
+        id="registerPassword"
+        type="password"
+        placeholder="Password"
+    >
+
+    <button onclick="registerUser()" style="width:100%">
+        Register
+    </button>
+
+    <p id="registerMessage"></p>
+
+    <div class="auth-switch">
+        Already have an account?
+        <button onclick="showLogin()">
+            Login
+        </button>
+    </div>
+
+</div>
+
+<!-- =====================================================
+     USER DASHBOARD
+===================================================== -->
+
+<div id="userDashboard" class="container hidden">
+
+    <div class="topbar">
+
+        <div>
+            <h2>User / Dealer Dashboard</h2>
+            <p id="userWelcome"></p>
+        </div>
+
+        <button class="danger-btn" onclick="logout()">
+            Logout
+        </button>
+
+    </div>
+
+    <!-- STATISTICS -->
+
+    <section class="dashboard">
+
+        <div class="card">
+            <h3>Total Shipments</h3>
+            <p id="total">0</p>
+        </div>
+
+        <div class="card">
+            <h3>Pending</h3>
+            <p id="pending">0</p>
+        </div>
+
+        <div class="card">
+            <h3>In Transit</h3>
+            <p id="transit">0</p>
+        </div>
+
+        <div class="card">
+            <h3>Delivered</h3>
+            <p id="delivered">0</p>
+        </div>
+
+        <div class="card">
+            <h3>At Risk</h3>
+            <p id="risk">0</p>
+        </div>
+
+    </section>
+
+    <!-- CREATE SHIPMENT -->
+
+    <section class="panel">
+
+        <h2>Create Shipment</h2>
+
+        <div class="form-grid">
+
+            <input
+                id="shipmentId"
+                placeholder="Shipment ID"
+            >
+
+            <input
+                id="origin"
+                placeholder="Origin"
+            >
+
+            <input
+                id="destination"
+                placeholder="Destination"
+            >
+
+            <input
+                id="weight"
+                type="number"
+                placeholder="Weight"
+            >
+
+            <input
+                id="cargo"
+                placeholder="Cargo"
+            >
+
+        </div>
+
+        <button id="createShipmentButton" type="button">
+            Create Shipment
+        </button>
+
+        <p id="shipmentMessage"></p>
+
+    </section>
+
+    <!-- SHIPMENTS -->
+
+    <section class="panel">
+
+        <div class="topbar">
+
+            <h2>Shipments</h2>
+
+            <button onclick="loadShipments()">
+                Refresh
+            </button>
+
+        </div>
+
+        <div id="shipmentList">
+            Loading...
+        </div>
+
+    </section>
+
+    <!-- SHIPMENT OPERATIONS -->
+
+    <section class="panel">
+
+        <h2>Shipment Intelligence</h2>
+
+        <input
+            id="selectedShipment"
+            placeholder="Shipment ID"
+        >
+
+        <button onclick="getTracking()">
+            Tracking History
+        </button>
+
+        <button onclick="getRisk()">
+            Risk Analysis
+        </button>
+
+        <button onclick="getRouteIntelligence()">
+            Route Intelligence
+        </button>
+
+        <button onclick="getDriverLocation()">
+            Driver Location
+        </button>
+
+        <div id="shipmentResult" class="result">
+            Select an operation.
+        </div>
+
+        <div id="routeMap" class="hidden"></div>
+
+    </section>
+
+    <!-- ASSIGN DRIVER -->
+
+    <section class="panel">
+
+        <h2>Assign Driver</h2>
+
+        <input
+            id="assignShipmentId"
+            placeholder="Shipment ID"
+        >
+
+        <input
+            id="assignDriverId"
+            placeholder="Driver ID"
+        >
+
+        <button onclick="assignDriver()">
+            Assign Driver
+        </button>
+
+        <button onclick="loadDrivers()">
+            Get Drivers
+        </button>
+
+        <div id="driversList"></div>
+
+        <p id="assignMessage"></p>
+
+    </section>
+
+</div>
+
+<!-- =====================================================
+     DRIVER DASHBOARD
+===================================================== -->
+
+<div id="driverDashboard" class="container hidden">
+
+    <div class="topbar">
+
+        <div>
+            <h2>Driver Dashboard</h2>
+            <p id="driverWelcome"></p>
+        </div>
+
+        <button class="danger-btn" onclick="logout()">
+            Logout
+        </button>
+
+    </div>
+
+    <!-- GPS -->
+
+    <section class="panel">
+
+        <h2>Manual GPS Update</h2>
+
+        <p>
+            Enter your current GPS coordinates.
+        </p>
+
+        <select id="driverGpsShipment">
+            <option value="">Select assigned shipment</option>
+        </select>
+
+        <input
+            id="driverLatitude"
+            type="number"
+            step="any"
+            placeholder="Latitude"
+        >
+
+        <input
+            id="driverLongitude"
+            type="number"
+            step="any"
+            placeholder="Longitude"
+        >
+
+        <button onclick="updateGPS()">
+            Update GPS
+        </button>
+
+        <button onclick="useBrowserGPS()">
+            Get Current GPS
+        </button>
+
+        <p id="gpsMessage"></p>
+
+    </section>
+
+    <!-- STATUS -->
+
+    <section class="panel">
+
+        <h2>Update Shipment Status</h2>
+
+        <input
+            id="driverShipmentId"
+            placeholder="Shipment ID"
+        >
+
+        <select id="driverStatus">
+
+            <option value="pending">
+                Pending
+            </option>
+
+            <option value="In Transit">
+                In Transit
+            </option>
+
+            <option value="Delayed">
+                Delayed
+            </option>
+
+            <option value="Shipment Altered">
+                Shipment Altered
+            </option>
+
+            <option value="Delivered">
+                Delivered
+            </option>
+
+        </select>
+
+        <button onclick="updateShipmentStatus()">
+            Update Status
+        </button>
+
+        <p id="statusMessage"></p>
+
+    </section>
+
+    <!-- DRIVER SHIPMENTS -->
+
+    <section class="panel">
+
+        <h2>My Assigned Shipments</h2>
+
+        <button onclick="loadDriverShipments()">
+            Refresh
+        </button>
+
+        <div id="driverShipments">
+            Loading...
+        </div>
+
+    </section>
+
+</div>
+
+<script>
+const API="https://ner-smart-logistics-and-accessibility.onrender.com";
+const originalFetch=window.fetch.bind(window);
+async function authFetch(url,options={}){const token=localStorage.getItem("token");if(!token)throw new Error("Not logged in");options.headers={...(options.headers||{}),Authorization:"Bearer "+token};return originalFetch(url,options);}
+function hideEverything(){["loginPage","registerPage","userDashboard","driverDashboard"].forEach(id=>document.getElementById(id).classList.add("hidden"));}
+function showLogin(){hideEverything();document.getElementById("loginPage").classList.remove("hidden");}
+function showRegister(){hideEverything();document.getElementById("registerPage").classList.remove("hidden");}
+function updateRegisterFields(){const t=document.getElementById("registerType").value;document.getElementById("registerUsername").placeholder=t==="driver"?"Driver ID":"Username";}
+async function registerUser() {
+    const t = document.getElementById("registerType").value;
+    const u = document.getElementById("registerUsername").value.trim();
+    const p = document.getElementById("registerPassword").value;
+    const m = document.getElementById("registerMessage");
+
+    if (!u || !p) {
+        m.innerText = "Enter all fields.";
+        return;
+    }
+
+    try {
+        const r = await originalFetch(
+            t === "driver"
+                ? API + "/driver/register"
+                : API + "/register",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(
+                    t === "driver"
+                        ? {
+                            driver_id: u,
+                            password: p
+                        }
+                        : {
+                            username: u,
+                            password: p
+                        }
+                )
+            }
+        );
+
+        const text = await r.text();
+
+        let d = {};
+
+        try {
+            d = text ? JSON.parse(text) : {};
+        } catch {
+            throw new Error(
+                "Server returned an invalid response: " + text
+            );
+        }
+
+        if (!r.ok) {
+            throw new Error(
+                d.detail || d.message || "Registration failed"
+            );
+        }
+
+        m.innerText = "Registration successful. Please login.";
+        m.className = "success";
+
+    } catch (e) {
+        m.innerText = e.message;
+        m.className = "error";
+    }
+}
+async function login() {
+    const t = document.getElementById("loginType").value;
+    const u = document.getElementById("loginUsername").value.trim();
+    const p = document.getElementById("loginPassword").value;
+    const m = document.getElementById("loginMessage");
+
+    if (!u || !p) {
+        m.innerText = "Enter your credentials.";
+        return;
+    }
+
+    try {
+        const r = await originalFetch(
+            t === "driver"
+                ? API + "/driver/login"
+                : API + "/login",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(
+                    t === "driver"
+                        ? {
+                            driver_id: u,
+                            password: p
+                        }
+                        : {
+                            username: u,
+                            password: p
+                        }
+                )
+            }
+        );
+
+        const text = await r.text();
+
+        let d = {};
+
+        try {
+            d = text ? JSON.parse(text) : {};
+        } catch {
+            throw new Error(
+                "Server returned an invalid response: " + text
+            );
+        }
+
+        if (!r.ok) {
+            throw new Error(
+                d.detail || d.message || "Login failed"
+            );
+        }
+
+        localStorage.setItem("token", d.token);
+
+        if (t === "driver") {
+            localStorage.setItem("role", "driver");
+            localStorage.setItem("driver_id", d.driver_id);
+            showDriverDashboard();
+        } else {
+            localStorage.setItem("role", d.role || "dealer");
+            localStorage.setItem("username", d.username || u);
+            showUserDashboard();
+        }
+
+    } catch (e) {
+        m.innerText = e.message;
+        m.className = "error";
+    }
+}
+function logout(){["token","role","username","driver_id"].forEach(k=>localStorage.removeItem(k));showLogin();}
+async function showUserDashboard(){hideEverything();document.getElementById("userDashboard").classList.remove("hidden");document.getElementById("userWelcome").innerText="Logged in as: "+(localStorage.getItem("username")||"");clearShipmentForm();await loadShipments();}
+async function showDriverDashboard(){hideEverything();document.getElementById("driverDashboard").classList.remove("hidden");document.getElementById("driverWelcome").innerText="Driver ID: "+(localStorage.getItem("driver_id")||"");await loadDriverShipments();}
+function clearShipmentForm(){
+ ["shipmentId","origin","destination","weight","cargo"].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el)el.value="";
+ });
+ const m=document.getElementById("shipmentMessage");
+ if(m){m.innerText="";m.className="";}
+}
+
+async function createShipment(){
+ const m=document.getElementById("shipmentMessage");
+ try{
+  const s={
+   shipment_id:document.getElementById("shipmentId").value.trim(),
+   origin:document.getElementById("origin").value.trim(),
+   destination:document.getElementById("destination").value.trim(),
+   weight:Number(document.getElementById("weight").value),
+   cargo:document.getElementById("cargo").value.trim(),
+   status:"pending"
+  };
+  if(!s.shipment_id||!s.origin||!s.destination||!s.cargo||!Number.isFinite(s.weight)||s.weight<0){
+   m.innerText="Please fill all shipment fields correctly.";
+   m.className="error";
+   return;
+  }
+  m.innerText="Creating shipment...";
+  m.className="";
+  const r=await authFetch(API+"/shipments/",{
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify(s)
+  });
+  const text=await r.text();
+  let d={};
+  try{d=text?JSON.parse(text):{};}catch{throw new Error("Server returned an invalid response.");}
+  if(!r.ok)throw new Error(d.detail||d.message||"Could not create shipment");
+  m.innerText=d.message||"Shipment created successfully.";
+  m.className="success";
+  ["shipmentId","origin","destination","weight","cargo"].forEach(id=>{
+   const el=document.getElementById(id);
+   if(el)el.value="";
+  });
+  await loadShipments();
+ }catch(e){
+  m.innerText=e.message||"Could not create shipment";
+  m.className="error";
+ }
+}
+
+function wireCreateShipmentButton(){
+ const b=document.getElementById("createShipmentButton");
+ if(!b)return;
+ b.addEventListener("click",createShipment);
+ b.addEventListener("touchend",function(e){
+  e.preventDefault();
+  createShipment();
+ },{passive:false});
+}
+async function loadShipments(){try{const r=await authFetch(API+"/shipments/"),d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not load shipments");const a=Array.isArray(d.shipments)?d.shipments:[],list=document.getElementById("shipmentList");document.getElementById("total").innerText=a.length;document.getElementById("pending").innerText=a.filter(x=>(x.status||"").toLowerCase()==="pending").length;document.getElementById("transit").innerText=a.filter(x=>(x.status||"").toLowerCase()==="in transit").length;document.getElementById("delivered").innerText=a.filter(x=>(x.status||"").toLowerCase()==="delivered").length;document.getElementById("risk").innerText=a.filter(x=>["delayed","shipment altered"].includes((x.status||"").toLowerCase())).length;list.innerHTML="";if(!a.length){list.innerText="No shipments found.";return;}a.forEach(x=>{const e=document.createElement("div");e.className="shipment";e.innerHTML=`<strong>${x.shipment_id||""}</strong><p>${x.origin||""} → ${x.destination||""}</p><p>Cargo: ${x.cargo||""}</p><p>Weight: ${x.weight??""}</p><p>Status: <span class="status">${x.status||"Unknown"}</span></p><p>Driver: ${x.driver_id||"Unassigned"}</p><button>Select</button>`;e.querySelector("button").onclick=()=>document.getElementById("selectedShipment").value=x.shipment_id;list.appendChild(e);});}catch(e){document.getElementById("shipmentList").innerText=e.message;}}
+async function getTracking(){await simpleIntelligence("/tracking");}
+async function simpleIntelligence(path){const id=document.getElementById("selectedShipment").value.trim(),o=document.getElementById("shipmentResult");if(!id){o.innerText="Select a shipment first.";return;}try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(id)+path),d=await r.json();if(!r.ok)throw new Error(d.detail||"Request failed");o.innerText=JSON.stringify(d,null,2);}catch(e){o.innerText=e.message;}}
+function hideMap(){const b=document.getElementById("routeMap");if(b)b.classList.add("hidden");if(window.routeMap){window.routeMap.remove();window.routeMap=null;}}
+async function getRisk(){const id=document.getElementById("selectedShipment").value.trim(),o=document.getElementById("shipmentResult");hideMap();if(!id){o.innerText="Select a shipment first.";return;}try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(id)+"/risk"),d=await r.json();if(!r.ok)throw new Error(d.detail||"Risk analysis failed");const reasons=Array.isArray(d.reasons)?d.reasons:[];o.innerHTML=`<h3>Shipment Risk</h3><p><strong>Status:</strong> ${d.status||"Unknown"}</p><p><strong>Risk:</strong> ${d.risk||"UNKNOWN"}</p><p><strong>Risk Score:</strong> ${d.score??0}/100</p><p><strong>Reason:</strong> ${reasons.join(", ")||"No reason supplied"}</p><p>${d.note||"Shipment-condition risk only."}</p>`;}catch(e){o.innerText=e.message;}}
+function renderRouteMap(d){const box=document.getElementById("routeMap");if(!box||!window.L)return;box.classList.remove("hidden");if(window.routeMap)window.routeMap.remove();window.routeMap=L.map("routeMap");L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"© OpenStreetMap contributors"}).addTo(window.routeMap);const bounds=[];const o=d.origin_coordinates||{},q=d.destination_coordinates||{};if(o.latitude!=null&&o.longitude!=null){L.marker([o.latitude,o.longitude]).addTo(window.routeMap).bindPopup("Origin: "+d.origin);bounds.push([o.latitude,o.longitude]);}if(q.latitude!=null&&q.longitude!=null){L.marker([q.latitude,q.longitude]).addTo(window.routeMap).bindPopup("Destination: "+d.destination);bounds.push([q.latitude,q.longitude]);}(Array.isArray(d.routes)?d.routes:[]).forEach((r,i)=>{const c=r.geometry?.coordinates;if(!Array.isArray(c))return;const pts=c.map(x=>[x[1],x[0]]);L.polyline(pts,{weight:i===0?6:4,opacity:i===0?.9:.45}).addTo(window.routeMap).bindPopup(r.route_name||r.road_refs?.join(" / ")||("Route "+(i+1)));pts.forEach(x=>bounds.push(x));});if(bounds.length)window.routeMap.fitBounds(bounds,{padding:[20,20]});}
+async function getRouteIntelligence(){
+ const id=document.getElementById("selectedShipment").value.trim(),o=document.getElementById("shipmentResult");
+ if(!id){o.innerText="Select a shipment first.";return;}
+ try{
+  const r=await authFetch(API+"/shipments/"+encodeURIComponent(id)+"/route-intelligence"),d=await r.json();
+  if(!r.ok)throw new Error(d.detail||"Route intelligence failed");
+  const routes=Array.isArray(d.routes)?d.routes:[];
+  if(!routes.length)throw new Error("No routes returned.");
+  const eventText=(events,empty)=>events&&events.length?events.map(e=>`<li>${e.title||"NASA event"}${e.nearest_km!=null?` — ${e.nearest_km} km from sampled corridor`:""}${e.date?` (${e.date.slice(0,10)})`:""}</li>`).join(""):`<span>${empty}</span>`;
+  o.innerHTML=`<h3>Route Intelligence</h3><p><strong>Origin:</strong> ${d.origin||""} &nbsp; → &nbsp; <strong>Destination:</strong> ${d.destination||""}</p><p style="margin-top:8px">Route risk combines live weather forecasts with nearby NASA EONET events. Flood and landslide values are shown as real event detections, not made-up probabilities.</p>`+
+  routes.map(x=>{
+   const k=x.risk||{},rs=Array.isArray(k.reasons)?k.reasons:[];
+   const floodEvents=Array.isArray(k.flood_events)?k.flood_events:[];
+   const landEvents=Array.isArray(k.landslide_events)?k.landslide_events:[];
+   return `<div class="route-card"><h3>${x.rank===1?"Recommended route: ":"Alternative route: "}${x.route_name||"Road name unavailable"}</h3><p><strong>Major corridors:</strong> ${(x.road_refs||[]).slice(0,6).join(" → ")||"Road references unavailable"}</p><p><strong>Distance:</strong> ${x.distance_km??0} km &nbsp; <strong>Estimated drive:</strong> ${x.duration_minutes??0} min</p><p><strong>Route Risk:</strong> ${k.risk||"UNKNOWN"} (${k.score??0}/100)</p><div class="risk-grid"><div class="risk-item"><strong>Rain forecast</strong><br>${k.rainfall_mm??0} mm</div><div class="risk-item"><strong>Rain chance</strong><br>${k.rain_probability??0}%</div><div class="risk-item"><strong>NASA Flood</strong><br>${floodEvents.length?floodEvents.length+" event(s) nearby":"No recent event detected"}</div><div class="risk-item"><strong>NASA Landslide</strong><br>${landEvents.length?landEvents.length+" event(s) nearby":"No recent event detected"}</div><div class="risk-item"><strong>Election</strong><br>No live feed</div><div class="risk-item"><strong>Riot / bridge</strong><br>No live feed</div></div><p><strong>NASA flood check:</strong> ${k.flood_status||"Unavailable"}</p><ul>${eventText(floodEvents,"")}</ul><p><strong>NASA landslide check:</strong> ${k.landslide_status||"Unavailable"}</p><ul>${eventText(landEvents,"")}</ul><p><strong>Risk factors:</strong> ${rs.join("; ")||"None"}</p></div>`;
+  }).join("");
+  renderRouteMap(d);
+ }catch(e){o.innerText=e.message;hideMap();}
+}
+async function getDriverLocation(){const id=document.getElementById("selectedShipment").value.trim(),o=document.getElementById("shipmentResult");hideMap();if(!id){o.innerText="Select a shipment first.";return;}try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(id)+"/location"),d=await r.json();if(!r.ok)throw new Error(d.detail||"Driver location failed");if(d.latitude==null||d.longitude==null){o.innerText=d.message||"No GPS data available yet.";return;}o.innerHTML=`<h3>Driver Location</h3><p><strong>Driver:</strong> ${d.driver_id||"Unknown"}</p><p><strong>Latitude:</strong> ${d.latitude}</p><p><strong>Longitude:</strong> ${d.longitude}</p><p><strong>Updated:</strong> ${d.timestamp||"Unknown"}</p>`;}catch(e){o.innerText=e.message;}}
+async function loadDrivers(){try{const r=await authFetch(API+"/drivers"),d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not load drivers");const list=document.getElementById("driversList");list.innerHTML="";const a=Array.isArray(d.drivers)?d.drivers:[];if(!a.length){list.innerText="No available drivers.";return;}a.forEach(x=>{const e=document.createElement("div");e.className="driver-card";e.innerHTML=`<strong>${x.driver_id}</strong><br><button>Select Driver</button>`;e.querySelector("button").onclick=()=>document.getElementById("assignDriverId").value=x.driver_id;list.appendChild(e);});}catch(e){document.getElementById("driversList").innerText=e.message;}}
+async function assignDriver(){const sid=document.getElementById("assignShipmentId").value.trim(),did=document.getElementById("assignDriverId").value.trim();if(!sid||!did){document.getElementById("assignMessage").innerText="Enter shipment ID and driver ID.";return;}try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(sid)+"/assign-driver",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({driver_id:did})}),d=await r.json();if(!r.ok)throw new Error(d.detail||"Driver assignment failed");document.getElementById("assignMessage").innerText="Driver assigned successfully.";await loadDrivers();await loadShipments();}catch(e){document.getElementById("assignMessage").innerText=e.message;}}
+async function updateGPS(){const sid=document.getElementById("driverGpsShipment").value.trim(),lat=Number(document.getElementById("driverLatitude").value),lon=Number(document.getElementById("driverLongitude").value),m=document.getElementById("gpsMessage");if(!sid){m.innerText="Select an assigned shipment.";return;}if(!Number.isFinite(lat)||!Number.isFinite(lon)){m.innerText="Enter valid latitude and longitude.";return;}try{const r=await authFetch(API+"/driver/gps",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({shipment_id:sid,latitude:lat,longitude:lon})}),d=await r.json();if(!r.ok)throw new Error(d.detail||"GPS update failed");m.innerText="GPS updated successfully.";}catch(e){m.innerText=e.message;}}
+function useBrowserGPS(){if(!navigator.geolocation){document.getElementById("gpsMessage").innerText="Browser GPS is not supported.";return;}navigator.geolocation.getCurrentPosition(p=>{document.getElementById("driverLatitude").value=p.coords.latitude;document.getElementById("driverLongitude").value=p.coords.longitude;},()=>document.getElementById("gpsMessage").innerText="Could not access GPS.");}
+async function updateShipmentStatus(){const sid=document.getElementById("driverShipmentId").value.trim(),status=document.getElementById("driverStatus").value,m=document.getElementById("statusMessage");if(!sid){m.innerText="Enter shipment ID.";return;}try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(sid),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})}),d=await r.json();if(!r.ok)throw new Error(d.detail||"Status update failed");m.innerText="Shipment status updated.";await loadDriverShipments();}catch(e){m.innerText=e.message;}}
+async function loadDriverShipments(){try{const r=await authFetch(API+"/shipments/"),d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not load assigned shipments");const a=Array.isArray(d.shipments)?d.shipments:[],c=document.getElementById("driverShipments"),sel=document.getElementById("driverGpsShipment");c.innerHTML="";sel.innerHTML='<option value="">Select assigned shipment</option>';a.forEach(x=>{const o=document.createElement("option");o.value=x.shipment_id;o.textContent=x.shipment_id+" — "+(x.origin||"")+" → "+(x.destination||"");sel.appendChild(o);});if(!a.length){c.innerText="No assigned shipments.";return;}a.forEach(x=>{const e=document.createElement("div");e.className="shipment";e.innerHTML=`<strong>${x.shipment_id}</strong><p>${x.origin||""} → ${x.destination||""}</p><p>Status: ${x.status||"Unknown"}</p><button>Select Shipment</button>`;e.querySelector("button").onclick=()=>{document.getElementById("driverShipmentId").value=x.shipment_id;sel.value=x.shipment_id;};c.appendChild(e);});}catch(e){document.getElementById("driverShipments").innerText=e.message;}}
+window.onload=async()=>{const t=localStorage.getItem("token"),r=localStorage.getItem("role");if(!t||!r){showLogin();return;}try{await authFetch(API+"/shipments/");if(r==="driver")await showDriverDashboard();else await showUserDashboard();}catch(e){logout();}};
+document.addEventListener("DOMContentLoaded",wireCreateShipmentButton);
+</script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</body>
+</html>
