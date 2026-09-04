@@ -28,11 +28,6 @@ import urllib.request
 import urllib.parse
 import math
 
-try:
-    from sklearn.ensemble import IsolationForest
-except ImportError:
-    IsolationForest = None
-
 
 # ---------------------------------------------------------
 # DATABASE
@@ -514,34 +509,36 @@ def update_shipment(
 
 @app.delete("/shipments/{shipment_id}")
 def delete_shipment(
+
     shipment_id: str,
-    db: Session = Depends(get_db),
-    authorization: str | None = Header(default=None)
+
+    db: Session = Depends(get_db)
+
 ):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Login required")
 
-    token = authorization.replace("Bearer ", "").strip()
-    if token in active_driver_tokens:
-        raise HTTPException(status_code=403, detail="Drivers cannot delete shipments")
-
-    current_user = get_current_user(token)
-    existing_shipment = db.query(ShipmentDB).filter(
+    existing_shipment = db.query(
+        ShipmentDB
+    ).filter(
         ShipmentDB.shipment_id == shipment_id
     ).first()
 
-    if not existing_shipment:
-        raise HTTPException(status_code=404, detail="Shipment not found")
-    if existing_shipment.owner_username != current_user["username"]:
-        raise HTTPException(status_code=403, detail="Access denied")
 
-    db.query(TrackingEventDB).filter(TrackingEventDB.shipment_id == shipment_id).delete(synchronize_session=False)
-    db.query(GPSLocationDB).filter(GPSLocationDB.shipment_id == shipment_id).delete(synchronize_session=False)
-    db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id == shipment_id).delete(synchronize_session=False)
+    if not existing_shipment:
+
+        return {
+            "message": "Shipment not found"
+        }
+
+
     db.delete(existing_shipment)
+
     db.commit()
 
-    return {"message": "Shipment deleted successfully"}
+
+    return {
+
+        "message": "Shipment deleted successfully"
+    }
 
 
 # =========================================================
@@ -973,380 +970,442 @@ def sample_route_weather(route, origin, destination):
 # =========================================================
 
 
-HAZARD_RADIUS_KM = 50.0
-NASA_PMM_URL = "https://pmmpublisher.pps.eosdis.nasa.gov/opensearch"
+def calculate_route_risk(
 
-hazard_cache = {}
+    route,
 
+    weather_points
 
-def _bbox_around_point(lat, lon, radius_km=HAZARD_RADIUS_KM):
-    lat_delta = radius_km / 111.0
-    lon_delta = radius_km / max(111.0 * math.cos(math.radians(lat)), 1.0)
-    return lon - lon_delta, lat - lat_delta, lon + lon_delta, lat + lat_delta
+):
 
+    score = 0
 
-def _numeric_hazard_value(properties):
-    if not isinstance(properties, dict):
-        return None
-    preferred = [
-        "probability", "prob", "hazard", "value", "nowcast",
-        "flood_probability", "landslide_probability", "risk"
-    ]
-    for key in preferred:
-        value = properties.get(key)
-        if isinstance(value, (int, float)) and math.isfinite(float(value)):
-            return float(value)
-    for key, value in properties.items():
-        key_l = str(key).lower()
-        if any(term in key_l for term in ("prob", "hazard", "nowcast", "risk")):
-            if isinstance(value, (int, float)) and math.isfinite(float(value)):
-                return float(value)
-    return None
+    reasons = []
 
 
-def _normalise_hazard_value(value):
-    if value is None:
-        return None
-    # Some hazard products expose probabilities in [0,1]; convert only then.
-    if 0.0 <= value <= 1.0:
-        return round(value * 100.0, 2)
-    return round(max(0.0, min(100.0, value)), 2)
+    max_rain = 0
+
+    max_probability = 0
 
 
-def get_nasa_hazard(lat, lon, dataset):
-    """Fetch a real NASA PMM hazard product around a route point.
+    for point in weather_points:
 
-    Returns a source value normalized to 0-100 for display/risk scoring.
-    No synthetic flood/landslide value is generated on failure.
-    """
-    date = datetime.utcnow().strftime("%Y-%m-%d")
-    cache_key = (dataset, round(float(lat), 3), round(float(lon), 3), date)
-    if cache_key in hazard_cache:
-        return hazard_cache[cache_key]
+        weather = point["weather"]
 
-    result = {
-        "value": None,
-        "source": "NASA GPM/PMM",
-        "dataset": dataset,
-        "radius_km": HAZARD_RADIUS_KM,
-        "status": "Live hazard data unavailable"
-    }
-    try:
-        query = urllib.parse.urlencode({
-            "q": dataset,
-            "limit": 1,
-            "startTime": date,
-            "endTime": date
-        })
-        request = urllib.request.Request(
-            NASA_PMM_URL + "?" + query,
-            headers={"User-Agent": "NER-Smart-Logistics-Prototype/1.0"}
+
+        max_rain = max(
+            max_rain,
+            weather["precipitation_mm"]
         )
-        with urllib.request.urlopen(request, timeout=20) as response:
-            catalog = json.loads(response.read().decode())
-        items = catalog.get("items") or []
-        if not items:
-            hazard_cache[cache_key] = result
-            return result
 
-        item = items[0]
-        subset_url = None
-        for action in item.get("action", []):
-            for using in action.get("using", []):
-                if action.get("@type") == "ojo:subset" and using.get("url"):
-                    subset_url = using["url"]
-                    break
-            if subset_url:
-                break
 
-        if not subset_url:
-            result["status"] = "NASA product found, but spatial subset is unavailable"
-            hazard_cache[cache_key] = result
-            return result
+        max_probability = max(
+            max_probability,
+            weather["rain_probability"]
+        )
 
-        ll_lon, ll_lat, ur_lon, ur_lat = _bbox_around_point(lat, lon)
-        bbox = f"{ll_lon},{ll_lat},{ur_lon},{ur_lat}"
-        url = subset_url.replace("{LLlon}", str(ll_lon)) \
-                         .replace("{LLlat}", str(ll_lat)) \
-                         .replace("{URLon}", str(ur_lon)) \
-                         .replace("{URLat}", str(ur_lat))
-        with urllib.request.urlopen(url, timeout=25) as response:
-            payload = json.loads(response.read().decode())
 
-        values = []
-        for feature in payload.get("features", []) if isinstance(payload, dict) else []:
-            value = _numeric_hazard_value(feature.get("properties", {}))
-            if value is not None:
-                values.append(value)
-        if values:
-            result["value"] = _normalise_hazard_value(max(values))
-            result["status"] = "Live NASA hazard data"
-        else:
-            result["status"] = "NASA product returned no numeric hazard value for this area"
-    except Exception as exc:
-        result["status"] = f"NASA hazard feed unavailable: {str(exc)}"
+    # Heavy rainfall
 
-    hazard_cache[cache_key] = result
+    if max_rain >= 50:
+
+        score += 35
+
+        reasons.append(
+            "Heavy rainfall forecast"
+        )
+
+    elif max_rain >= 25:
+
+        score += 20
+
+        reasons.append(
+            "Moderate rainfall forecast"
+        )
+
+    elif max_rain >= 10:
+
+        score += 10
+
+        reasons.append(
+            "Some rainfall forecast"
+        )
+
+
+    # High rain probability
+
+    if max_probability >= 80:
+
+        score += 20
+
+        reasons.append(
+            "High probability of precipitation"
+        )
+
+    elif max_probability >= 60:
+
+        score += 10
+
+        reasons.append(
+            "Elevated precipitation probability"
+        )
+
+
+    # NER terrain heuristic
+
+    ner_points = 0
+
+
+    for point in weather_points:
+
+        lat = point["latitude"]
+
+        lon = point["longitude"]
+
+
+        if (
+
+            21.5 <= lat <= 29.5
+
+            and
+
+            88.0 <= lon <= 97.5
+
+        ):
+
+            ner_points += 1
+
+
+    if ner_points > 0 and max_rain >= 25:
+
+        score += 20
+
+        reasons.append(
+            "Rainfall may increase "
+            "landslide/accessibility risk "
+            "in the NER terrain"
+        )
+
+
+    # Route duration factor
+
+    hours = route["duration"] / 3600
+
+
+    if hours > 12:
+
+        score += 10
+
+        reasons.append(
+            "Long route duration"
+        )
+
+
+    if score >= 50:
+
+        risk = "HIGH"
+
+    elif score >= 25:
+
+        risk = "MEDIUM"
+
+    else:
+
+        risk = "LOW"
+
+
+    if not reasons:
+
+        reasons.append(
+            "No major weather risk indicators detected"
+        )
+
+
+    return {
+
+        "risk": risk,
+
+        "score": min(score, 100),
+
+        "reasons": reasons,
+
+        "rainfall_mm": max_rain,
+
+        "rain_probability": max_probability
+    }
+
+
+# =========================================================
+# ROUTE INTELLIGENCE — LIVE WEATHER + NASA EONET HAZARDS
+# =========================================================
+
+def geocode_location(location):
+    """Geocode an Indian place name, avoiding ambiguous global matches."""
+    key = location.strip().lower()
+    if key in geocode_cache:
+        return geocode_cache[key]
+
+    params = urllib.parse.urlencode({
+        "q": location.strip() + ", India",
+        "format": "jsonv2",
+        "limit": 1,
+        "countrycodes": "in"
+    })
+    url = "https://nominatim.openstreetmap.org/search?" + params
+    request = urllib.request.Request(url, headers={"User-Agent": "NER-Smart-Logistics-Prototype/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Geocoding service error: {str(e)}")
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Could not find Indian location: {location}")
+    result = {
+        "latitude": float(data[0]["lat"]),
+        "longitude": float(data[0]["lon"]),
+        "display_name": data[0].get("display_name", location)
+    }
+    geocode_cache[key] = result
     return result
 
 
-def sample_route_hazards(route):
-    geometry = route.get("geometry") or {}
-    coordinates = geometry.get("coordinates", []) if isinstance(geometry, dict) else []
-    if not coordinates:
-        return {"flood": [], "landslide": []}
-    indexes = list(dict.fromkeys([0, len(coordinates) // 2, len(coordinates) - 1]))
-    flood = []
-    landslide = []
-    for index in indexes:
-        point = coordinates[index]
-        if not isinstance(point, list) or len(point) < 2:
+def get_routes(origin_lat, origin_lon, destination_lat, destination_lon):
+    coordinates = f"{origin_lon},{origin_lat};{destination_lon},{destination_lat}"
+    url = (
+        "https://router.project-osrm.org/route/v1/driving/" + coordinates +
+        "?alternatives=true&overview=full&geometries=geojson&steps=true"
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": "NER-Smart-Logistics-Prototype/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Route service error: {str(e)}")
+    if data.get("code") != "Ok":
+        raise HTTPException(status_code=400, detail=f"OSRM error: {data}")
+    routes = data.get("routes", [])
+    if not routes:
+        raise HTTPException(status_code=404, detail="No route found")
+    return routes
+
+
+def sample_route_points(route, count=5):
+    coords = (route.get("geometry") or {}).get("coordinates", []) or []
+    if not coords:
+        return []
+    count = min(count, len(coords))
+    indexes = sorted(set(round(i * (len(coords) - 1) / max(count - 1, 1)) for i in range(count)))
+    return [{"latitude": float(coords[i][1]), "longitude": float(coords[i][0])}
+            for i in indexes if isinstance(coords[i], list) and len(coords[i]) >= 2]
+
+
+def sample_route_weather(route, origin=None, destination=None):
+    results = []
+    for point in sample_route_points(route, 5):
+        try:
+            weather = get_weather(point["latitude"], point["longitude"])
+            results.append({**point, "weather": weather})
+        except Exception:
             continue
-        lon, lat = float(point[0]), float(point[1])
-        flood.append({"latitude": lat, "longitude": lon, "data": get_nasa_hazard(lat, lon, "flood_nowcast")})
-        landslide.append({"latitude": lat, "longitude": lon, "data": get_nasa_hazard(lat, lon, "global_landslide_nowcast_30mn")})
-    return {"flood": flood, "landslide": landslide}
+    return results
 
 
-def calculate_route_risk(route, weather_points, hazard_points=None):
-    max_rain = 0.0
-    max_probability = 0.0
-    for point in weather_points:
-        w = point.get("weather", {})
-        max_rain = max(max_rain, float(w.get("precipitation_mm", 0) or 0))
-        max_probability = max(max_probability, float(w.get("rain_probability", 0) or 0))
+def _haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2-lat1), math.radians(lon2-lon1)
+    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return 2*r*math.asin(math.sqrt(a))
 
-    hazard_points = hazard_points or {"flood": [], "landslide": []}
-    flood_values = [x["data"]["value"] for x in hazard_points.get("flood", []) if x.get("data", {}).get("value") is not None]
-    landslide_values = [x["data"]["value"] for x in hazard_points.get("landslide", []) if x.get("data", {}).get("value") is not None]
-    flood_hazard = max(flood_values) if flood_values else None
-    landslide_hazard = max(landslide_values) if landslide_values else None
 
-    score = 0
-    reasons = []
-    if max_rain >= 50:
-        score += 35; reasons.append("Heavy rainfall forecast")
-    elif max_rain >= 25:
-        score += 20; reasons.append("Moderate rainfall forecast")
-    elif max_rain >= 10:
-        score += 10; reasons.append("Rainfall forecast")
-    if max_probability >= 80:
-        score += 20; reasons.append("High precipitation probability")
-    elif max_probability >= 60:
-        score += 10; reasons.append("Elevated precipitation probability")
+def _geometry_points(geometry):
+    """Extract representative [lon,lat] points from EONET Point/Polygon geometries."""
+    if not isinstance(geometry, dict):
+        return []
+    coords = geometry.get("coordinates")
+    out = []
+    def walk(x):
+        if isinstance(x, (list, tuple)) and len(x) >= 2 and isinstance(x[0], (int,float)) and isinstance(x[1], (int,float)):
+            out.append((float(x[1]), float(x[0])))
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+    walk(coords)
+    return out
 
-    if landslide_hazard is not None:
-        if landslide_hazard >= 70:
-            score += 25; reasons.append("High NASA landslide hazard in the 50 km route area")
-        elif landslide_hazard >= 40:
-            score += 15; reasons.append("Moderate NASA landslide hazard in the 50 km route area")
-    if flood_hazard is not None:
-        if flood_hazard >= 70:
-            score += 25; reasons.append("High NASA flood hazard in the 50 km route area")
-        elif flood_hazard >= 40:
-            score += 15; reasons.append("Moderate NASA flood hazard in the 50 km route area")
-    if route.get("duration", 0) / 3600 > 12:
+
+def get_nasa_eonet_hazards(route):
+    """Fetch recent/open NASA EONET Flood and Landslide events near sampled route points.
+    These are observed/curated events, NOT invented probabilities.
+    """
+    points = sample_route_points(route, 5)
+    if not points:
+        return {"flood": [], "landslide": []}
+
+    found = {"flood": {}, "landslide": {}}
+    category_map = {"flood": "floods", "landslide": "landslides"}
+    for kind, category in category_map.items():
+        for point in points:
+            lat, lon = point["latitude"], point["longitude"]
+            # ~75 km search box around each route sample; 30-day window keeps it operationally relevant.
+            d = 0.75
+            bbox = f"{lon-d},{lat+d},{lon+d},{lat-d}"
+            params = urllib.parse.urlencode({
+                "category": category, "status": "all", "days": 30,
+                "limit": 50, "bbox": bbox
+            })
+            url = "https://eonet.gsfc.nasa.gov/api/v3/events?" + params
+            request = urllib.request.Request(url, headers={"User-Agent": "NER-Smart-Logistics-Prototype/1.0"})
+            try:
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    events = json.loads(response.read().decode()).get("events", [])
+            except Exception:
+                continue
+            for event in events:
+                event_points = _geometry_points(event.get("geometry"))
+                distances = [_haversine_km(lat, lon, ep_lat, ep_lon) for ep_lat, ep_lon in event_points]
+                nearest = min(distances) if distances else None
+                eid = event.get("id") or event.get("title")
+                if eid and (eid not in found[kind] or (nearest is not None and nearest < found[kind][eid]["nearest_km"])):
+                    found[kind][eid] = {
+                        "id": event.get("id"),
+                        "title": event.get("title", "NASA EONET event"),
+                        "date": event.get("geometry", [{}])[-1].get("date") if event.get("geometry") else None,
+                        "open": event.get("closed") is None,
+                        "nearest_km": round(nearest, 1) if nearest is not None else None,
+                        "link": event.get("link")
+                    }
+    return {k: sorted(v.values(), key=lambda x: x["nearest_km"] if x["nearest_km"] is not None else 10**9)[:5] for k,v in found.items()}
+
+
+def calculate_route_risk(route, weather_points, nasa_hazards):
+    max_rain = max((float(p.get("weather", {}).get("precipitation_mm", 0) or 0) for p in weather_points), default=0.0)
+    max_probability = max((float(p.get("weather", {}).get("rain_probability", 0) or 0) for p in weather_points), default=0.0)
+    floods = nasa_hazards.get("flood", [])
+    landslides = nasa_hazards.get("landslide", [])
+
+    score, reasons = 0, []
+    if max_rain >= 50: score += 35; reasons.append("Heavy rainfall forecast on sampled route points")
+    elif max_rain >= 25: score += 20; reasons.append("Moderate rainfall forecast on sampled route points")
+    elif max_rain >= 10: score += 10; reasons.append("Rainfall forecast on sampled route points")
+    if max_probability >= 80: score += 20; reasons.append("High precipitation probability")
+    elif max_probability >= 60: score += 10; reasons.append("Elevated precipitation probability")
+
+    def hazard_points(events, label):
+        nonlocal score
+        if not events: return
+        nearest = events[0].get("nearest_km")
+        if nearest is not None and nearest <= 20: score += 30
+        elif nearest is not None and nearest <= 50: score += 20
+        else: score += 10
+        reasons.append(f"NASA EONET reported {label} event(s) near the sampled route corridor")
+
+    hazard_points(floods, "flood")
+    hazard_points(landslides, "landslide")
+    if route.get("duration", 0)/3600 > 12:
         score += 10; reasons.append("Long route duration")
-
     score = min(score, 100)
+
+    def status(events, label):
+        if not events:
+            return f"No NASA EONET {label} event found within sampled route corridors in the last 30 days"
+        e = events[0]
+        return f"{len(events)} NASA EONET {label} event(s) found; nearest: {e.get('nearest_km')} km — {e.get('title')}"
+
     return {
         "risk": "HIGH" if score >= 50 else "MEDIUM" if score >= 25 else "LOW",
         "score": score,
-        "reasons": reasons or ["No major route-weather-hazard indicators detected"],
+        "reasons": reasons or ["No major route-weather or nearby NASA event indicators detected"],
         "rainfall_mm": round(max_rain, 2),
         "rain_probability": round(max_probability, 2),
-        "flood_hazard": flood_hazard,
-        "landslide_hazard": landslide_hazard,
-        "flood_data_source": "NASA GPM/PMM Floods Nowcast" if flood_hazard is not None else "Live data unavailable",
-        "landslide_data_source": "NASA GPM/PMM Global Landslide Nowcast" if landslide_hazard is not None else "Live data unavailable"
+        "flood_events": floods,
+        "landslide_events": landslides,
+        "flood_status": status(floods, "flood"),
+        "landslide_status": status(landslides, "landslide"),
+        "data_sources": ["Open-Meteo forecast", "NASA EONET v3 recent natural-event metadata"],
+        "election_probability": None, "riot_probability": None, "bridge_broken_probability": None,
+        "election_status": "No live election feed connected",
+        "riot_status": "No live incident feed connected",
+        "bridge_broken_status": "No live bridge-condition feed connected"
     }
 
-
-def build_route_analysis(shipment):
-    origin = geocode_place(shipment.origin)
-    destination = geocode_place(shipment.destination)
-    routes = get_routes(origin["latitude"], origin["longitude"], destination["latitude"], destination["longitude"])
-    out = []
-    for i, route in enumerate(routes):
-        roads = get_route_road_names(route)
-        wp = sample_route_weather(route, origin, destination)
-        hp = sample_route_hazards(route)
-        rr = calculate_route_risk(route, wp, hp)
-        out.append({
-            "route_number": i + 1,
-            "route_name": roads["display_name"],
-            "road_names": roads["road_names"],
-            "road_refs": roads["road_refs"],
-            "distance_km": round(route["distance"] / 1000, 2),
-            "duration_minutes": round(route["duration"] / 60, 1),
-            "risk": rr,
-            "weather_points": wp,
-            "hazard_points": hp,
-            "geometry": route.get("geometry")
-        })
-    out.sort(key=lambda x: (x["risk"]["score"], x["duration_minutes"]))
-    for rank, item in enumerate(out, 1):
-        item["rank"] = rank
-    return {
-        "shipment_id": shipment.shipment_id,
-        "origin": shipment.origin,
-        "destination": shipment.destination,
-        "origin_coordinates": origin,
-        "destination_coordinates": destination,
-        "recommended_route": out[0],
-        "routes": out,
-        "hazard_radius_km": HAZARD_RADIUS_KM,
-        "data_sources": {
-            "weather": "Open-Meteo forecast",
-            "flood": "NASA GPM/PMM Floods Nowcast",
-            "landslide": "NASA GPM/PMM Global Landslide Nowcast"
-        }
-    }
-
-
-# =========================================================
-# ROUTE ROAD NAMES / MAP DATA
-# =========================================================
 
 def get_route_road_names(route):
-    names = []
-    refs = []
+    names, refs = [], []
     for leg in route.get("legs", []):
         for step in leg.get("steps", []):
             name = (step.get("name") or "").strip()
             ref = (step.get("ref") or "").strip()
-            if name and name not in names:
-                names.append(name)
-            if ref and ref not in refs:
-                refs.append(ref)
+            if ref and ref not in refs: refs.append(ref)
+            if name and name not in names: names.append(name)
+    # Keep the UI useful: show major corridor identifiers, not every local turn.
+    display_parts = refs[:6] if refs else names[:4]
     return {
-        "road_names": names,
-        "road_refs": refs,
-        "display_name": " / ".join(refs + names) if refs or names else "Road name unavailable"
+        "road_names": names[:12],
+        "road_refs": refs[:12],
+        "display_name": " → ".join(display_parts) if display_parts else "Road name unavailable"
     }
 
+# =========================================================
+# RISK ANALYSIS
+# =========================================================
 @app.get("/shipments/{shipment_id}/risk")
 def shipment_risk(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
     if not authorization: raise HTTPException(status_code=401, detail="Login required")
-    token=authorization.replace("Bearer ","").strip()
+    token = authorization.replace("Bearer ", "").strip()
     if token in active_driver_tokens:
-        driver_id=get_driver_from_token(token)
-        if not db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id==shipment_id,DriverAssignmentDB.driver_username==driver_id).first():
-            raise HTTPException(status_code=403,detail="Shipment is not assigned to this driver")
+        driver_id = get_driver_from_token(token)
+        if not db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id == shipment_id, DriverAssignmentDB.driver_username == driver_id).first():
+            raise HTTPException(status_code=403, detail="Shipment is not assigned to this driver")
     else:
-        user=get_current_user(token)
-        if user.get("role") not in ("dealer","user"): raise HTTPException(status_code=403,detail="Not authorized")
-    shipment=db.query(ShipmentDB).filter(ShipmentDB.shipment_id==shipment_id).first()
-    if not shipment: raise HTTPException(status_code=404,detail="Shipment not found")
-    status=(shipment.status or "pending").strip().lower()
-    score={"pending":10,"in transit":20,"delayed":75,"shipment altered":60,"altered":60,"delivered":0}.get(status,15)
-    reason={"pending":"Shipment is still pending","in transit":"Shipment is currently in transit","delayed":"Shipment has been marked Delayed","shipment altered":"Shipment has been marked Shipment Altered","altered":"Shipment has been marked Shipment Altered","delivered":"Shipment has been delivered"}.get(status,f"Current shipment status: {shipment.status}")
-    return {"shipment_id":shipment_id,"status":shipment.status,"risk":"HIGH" if score>=70 else "MEDIUM" if score>=35 else "LOW","score":score,"reasons":[reason],"note":"Shipment-condition risk only. Route/weather risk is shown in Route Intelligence."}
-
+        user = get_current_user(token)
+        if user.get("role") not in ("dealer", "user"): raise HTTPException(status_code=403, detail="Not authorized")
+    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
+    if not shipment: raise HTTPException(status_code=404, detail="Shipment not found")
+    status = (shipment.status or "pending").strip().lower()
+    score = {"pending":10,"in transit":20,"delayed":75,"shipment altered":60,"altered":60,"delivered":0}.get(status,15)
+    reason = {"pending":"Shipment is still pending","in transit":"Shipment is currently in transit","delayed":"Shipment has been marked Delayed","shipment altered":"Shipment has been marked Shipment Altered","altered":"Shipment has been marked Shipment Altered","delivered":"Shipment has been delivered"}.get(status, f"Current shipment status: {shipment.status}")
+    return {"shipment_id":shipment_id,"status":shipment.status,"risk":"HIGH" if score>=70 else "MEDIUM" if score>=35 else "LOW","score":score,"reasons":[reason],"note":"Shipment-condition risk only. Route/weather and NASA event intelligence is shown in Route Intelligence."}
 
 # =========================================================
 # ROUTE INTELLIGENCE ENDPOINT
 # =========================================================
-
 @app.get("/shipments/{shipment_id}/route-intelligence")
 def route_intelligence(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Login required")
+    if not authorization: raise HTTPException(status_code=401, detail="Login required")
     token = authorization.replace("Bearer ", "").strip()
     if token in active_driver_tokens:
         driver_id = get_driver_from_token(token)
-        allowed = db.query(DriverAssignmentDB).filter(
-            DriverAssignmentDB.shipment_id == shipment_id,
-            DriverAssignmentDB.driver_username == driver_id
-        ).first()
-        if not allowed:
+        if not db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id == shipment_id, DriverAssignmentDB.driver_username == driver_id).first():
             raise HTTPException(status_code=403, detail="Shipment is not assigned to this driver")
     else:
         user = get_current_user(token)
-        if user.get("role") not in ("dealer", "user"):
-            raise HTTPException(status_code=403, detail="Not authorized")
-
+        if user.get("role") not in ("dealer", "user"): raise HTTPException(status_code=403, detail="Not authorized")
     shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
-    if not shipment:
-        raise HTTPException(status_code=404, detail="Shipment not found")
-    return build_route_analysis(shipment)
+    if not shipment: raise HTTPException(status_code=404, detail="Shipment not found")
 
-
-# =========================================================
-# AI / ML DISRUPTION PREDICTION
-# =========================================================
-
-@app.get("/shipments/{shipment_id}/ai-disruption-prediction")
-def ai_disruption_prediction(shipment_id: str, db: Session = Depends(get_db), authorization: str | None = Header(default=None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Login required")
-    token = authorization.replace("Bearer ", "").strip()
-    if token in active_driver_tokens:
-        driver_id = get_driver_from_token(token)
-        allowed = db.query(DriverAssignmentDB).filter(
-            DriverAssignmentDB.shipment_id == shipment_id,
-            DriverAssignmentDB.driver_username == driver_id
-        ).first()
-        if not allowed:
-            raise HTTPException(status_code=403, detail="Shipment is not assigned to this driver")
-    else:
-        user = get_current_user(token)
-        if user.get("role") not in ("dealer", "user"):
-            raise HTTPException(status_code=403, detail="Not authorized")
-
-    shipment = db.query(ShipmentDB).filter(ShipmentDB.shipment_id == shipment_id).first()
-    if not shipment:
-        raise HTTPException(status_code=404, detail="Shipment not found")
-
-    analysis = build_route_analysis(shipment)
-    routes = analysis["routes"]
-    if IsolationForest is None:
-        raise HTTPException(status_code=500, detail="scikit-learn is not installed")
-
-    feature_rows = []
-    for route in routes:
-        risk = route["risk"]
-        feature_rows.append([
-            route["distance_km"],
-            route["duration_minutes"],
-            risk.get("rainfall_mm", 0) or 0,
-            risk.get("rain_probability", 0) or 0,
-            risk.get("flood_hazard", 0) or 0,
-            risk.get("landslide_hazard", 0) or 0
-        ])
-
-    # Unsupervised ML is used because the prototype does not yet have a large,
-    # labelled historical disruption dataset. No synthetic labels are created.
-    model = IsolationForest(n_estimators=150, random_state=42, contamination="auto")
-    model.fit(feature_rows)
-    raw_scores = model.decision_function(feature_rows)
-    min_score = min(raw_scores)
-    max_score = max(raw_scores)
-    spread = max(max_score - min_score, 1e-9)
-
-    predictions = []
-    for route, raw in zip(routes, raw_scores):
-        anomaly = 100.0 * (max_score - raw) / spread if len(routes) > 1 else 50.0
-        base = route["risk"]["score"]
-        disruption_score = round(min(100.0, max(0.0, 0.65 * base + 0.35 * anomaly)), 1)
-        predictions.append({
-            "rank": route["rank"],
-            "route_name": route["route_name"],
-            "ml_disruption_score": disruption_score,
-            "ml_anomaly_score": round(anomaly, 1),
-            "rule_based_route_score": base,
-            "risk": "HIGH" if disruption_score >= 70 else "MEDIUM" if disruption_score >= 35 else "LOW"
+    origin = geocode_location(shipment.origin)
+    destination = geocode_location(shipment.destination)
+    routes = get_routes(origin["latitude"], origin["longitude"], destination["latitude"], destination["longitude"])
+    out = []
+    for i, route in enumerate(routes):
+        roads = get_route_road_names(route)
+        weather_points = sample_route_weather(route)
+        nasa_hazards = get_nasa_eonet_hazards(route)
+        risk = calculate_route_risk(route, weather_points, nasa_hazards)
+        out.append({
+            "route_number": i+1,
+            "route_name": roads["display_name"],
+            "road_names": roads["road_names"],
+            "road_refs": roads["road_refs"],
+            "distance_km": round(route["distance"]/1000, 2),
+            "duration_minutes": round(route["duration"]/60, 1),
+            "risk": risk,
+            "weather_points": weather_points,
+            "geometry": route.get("geometry")
         })
-
-    predictions.sort(key=lambda x: x["ml_disruption_score"], reverse=True)
-    top = predictions[0]
-    return {
-        "shipment_id": shipment_id,
-        "prediction": top,
-        "route_predictions": predictions,
-        "model": "IsolationForest",
-        "model_type": "unsupervised anomaly detection",
-        "features": ["route distance", "route duration", "Open-Meteo rainfall", "Open-Meteo precipitation probability", "NASA flood hazard", "NASA landslide hazard"],
-        "training_note": "The model uses current route alternatives as observations and does not create synthetic disruption labels. A supervised model will be appropriate once sufficient labelled historical incident/delay data is collected.",
-        "data_sources": analysis["data_sources"]
-    }
+    out.sort(key=lambda x: (x["risk"]["score"], x["duration_minutes"]))
+    for rank, item in enumerate(out, 1): item["rank"] = rank
+    return {"shipment_id":shipment_id,"origin":shipment.origin,"destination":shipment.destination,
+            "origin_coordinates":origin,"destination_coordinates":destination,
+            "recommended_route":out[0],"routes":out}
