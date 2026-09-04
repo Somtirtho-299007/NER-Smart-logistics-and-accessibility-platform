@@ -509,36 +509,34 @@ def update_shipment(
 
 @app.delete("/shipments/{shipment_id}")
 def delete_shipment(
-
     shipment_id: str,
-
-    db: Session = Depends(get_db)
-
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None)
 ):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Login required")
 
-    existing_shipment = db.query(
-        ShipmentDB
-    ).filter(
+    token = authorization.replace("Bearer ", "").strip()
+    if token in active_driver_tokens:
+        raise HTTPException(status_code=403, detail="Drivers cannot delete shipments")
+
+    current_user = get_current_user(token)
+    existing_shipment = db.query(ShipmentDB).filter(
         ShipmentDB.shipment_id == shipment_id
     ).first()
 
-
     if not existing_shipment:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    if existing_shipment.owner_username != current_user["username"]:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-        return {
-            "message": "Shipment not found"
-        }
-
-
+    db.query(TrackingEventDB).filter(TrackingEventDB.shipment_id == shipment_id).delete(synchronize_session=False)
+    db.query(GPSLocationDB).filter(GPSLocationDB.shipment_id == shipment_id).delete(synchronize_session=False)
+    db.query(DriverAssignmentDB).filter(DriverAssignmentDB.shipment_id == shipment_id).delete(synchronize_session=False)
     db.delete(existing_shipment)
-
     db.commit()
 
-
-    return {
-
-        "message": "Shipment deleted successfully"
-    }
+    return {"message": "Shipment deleted successfully"}
 
 
 # =========================================================
