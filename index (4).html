@@ -364,7 +364,7 @@ button:hover {
 
         </div>
 
-        <button onclick="createShipment()">
+        <button id="createShipmentButton" type="button">
             Create Shipment
         </button>
 
@@ -719,9 +719,66 @@ async function login() {
     }
 }
 function logout(){["token","role","username","driver_id"].forEach(k=>localStorage.removeItem(k));showLogin();}
-async function showUserDashboard(){hideEverything();document.getElementById("userDashboard").classList.remove("hidden");document.getElementById("userWelcome").innerText="Logged in as: "+(localStorage.getItem("username")||"");await loadShipments();}
+async function showUserDashboard(){hideEverything();document.getElementById("userDashboard").classList.remove("hidden");document.getElementById("userWelcome").innerText="Logged in as: "+(localStorage.getItem("username")||"");clearShipmentForm();await loadShipments();}
 async function showDriverDashboard(){hideEverything();document.getElementById("driverDashboard").classList.remove("hidden");document.getElementById("driverWelcome").innerText="Driver ID: "+(localStorage.getItem("driver_id")||"");await loadDriverShipments();}
-async function createShipment(){const m=document.getElementById("shipmentMessage");try{const s={shipment_id:document.getElementById("shipmentId").value.trim(),origin:document.getElementById("origin").value.trim(),destination:document.getElementById("destination").value.trim(),weight:Number(document.getElementById("weight").value),cargo:document.getElementById("cargo").value.trim(),status:"pending"};if(!s.shipment_id||!s.origin||!s.destination||!s.cargo||!Number.isFinite(s.weight)){m.innerText="Please fill all shipment fields correctly.";return;}m.innerText="Creating shipment...";const r=await authFetch(API+"/shipments/",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(s)});const d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not create shipment");m.innerText="Shipment created successfully.";["shipmentId","origin","destination","weight","cargo"].forEach(id=>{const el=document.getElementById(id);if(el)el.value="";});await loadShipments();}catch(e){m.innerText=e.message||"Could not create shipment";}}
+function clearShipmentForm(){
+ ["shipmentId","origin","destination","weight","cargo"].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el)el.value="";
+ });
+ const m=document.getElementById("shipmentMessage");
+ if(m){m.innerText="";m.className="";}
+}
+
+async function createShipment(){
+ const m=document.getElementById("shipmentMessage");
+ try{
+  const s={
+   shipment_id:document.getElementById("shipmentId").value.trim(),
+   origin:document.getElementById("origin").value.trim(),
+   destination:document.getElementById("destination").value.trim(),
+   weight:Number(document.getElementById("weight").value),
+   cargo:document.getElementById("cargo").value.trim(),
+   status:"pending"
+  };
+  if(!s.shipment_id||!s.origin||!s.destination||!s.cargo||!Number.isFinite(s.weight)||s.weight<0){
+   m.innerText="Please fill all shipment fields correctly.";
+   m.className="error";
+   return;
+  }
+  m.innerText="Creating shipment...";
+  m.className="";
+  const r=await authFetch(API+"/shipments/",{
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify(s)
+  });
+  const text=await r.text();
+  let d={};
+  try{d=text?JSON.parse(text):{};}catch{throw new Error("Server returned an invalid response.");}
+  if(!r.ok)throw new Error(d.detail||d.message||"Could not create shipment");
+  m.innerText=d.message||"Shipment created successfully.";
+  m.className="success";
+  ["shipmentId","origin","destination","weight","cargo"].forEach(id=>{
+   const el=document.getElementById(id);
+   if(el)el.value="";
+  });
+  await loadShipments();
+ }catch(e){
+  m.innerText=e.message||"Could not create shipment";
+  m.className="error";
+ }
+}
+
+function wireCreateShipmentButton(){
+ const b=document.getElementById("createShipmentButton");
+ if(!b)return;
+ b.addEventListener("click",createShipment);
+ b.addEventListener("touchend",function(e){
+  e.preventDefault();
+  createShipment();
+ },{passive:false});
+}
 async function loadShipments(){try{const r=await authFetch(API+"/shipments/"),d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not load shipments");const a=Array.isArray(d.shipments)?d.shipments:[],list=document.getElementById("shipmentList");document.getElementById("total").innerText=a.length;document.getElementById("pending").innerText=a.filter(x=>(x.status||"").toLowerCase()==="pending").length;document.getElementById("transit").innerText=a.filter(x=>(x.status||"").toLowerCase()==="in transit").length;document.getElementById("delivered").innerText=a.filter(x=>(x.status||"").toLowerCase()==="delivered").length;document.getElementById("risk").innerText=a.filter(x=>["delayed","shipment altered"].includes((x.status||"").toLowerCase())).length;list.innerHTML="";if(!a.length){list.innerText="No shipments found.";return;}a.forEach(x=>{const e=document.createElement("div");e.className="shipment";e.innerHTML=`<strong>${x.shipment_id||""}</strong><p>${x.origin||""} → ${x.destination||""}</p><p>Cargo: ${x.cargo||""}</p><p>Weight: ${x.weight??""}</p><p>Status: <span class="status">${x.status||"Unknown"}</span></p><p>Driver: ${x.driver_id||"Unassigned"}</p><button>Select</button>`;e.querySelector("button").onclick=()=>document.getElementById("selectedShipment").value=x.shipment_id;list.appendChild(e);});}catch(e){document.getElementById("shipmentList").innerText=e.message;}}
 async function getTracking(){await simpleIntelligence("/tracking");}
 async function simpleIntelligence(path){const id=document.getElementById("selectedShipment").value.trim(),o=document.getElementById("shipmentResult");if(!id){o.innerText="Select a shipment first.";return;}try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(id)+path),d=await r.json();if(!r.ok)throw new Error(d.detail||"Request failed");o.innerText=JSON.stringify(d,null,2);}catch(e){o.innerText=e.message;}}
@@ -755,6 +812,7 @@ function useBrowserGPS(){if(!navigator.geolocation){document.getElementById("gps
 async function updateShipmentStatus(){const sid=document.getElementById("driverShipmentId").value.trim(),status=document.getElementById("driverStatus").value,m=document.getElementById("statusMessage");if(!sid){m.innerText="Enter shipment ID.";return;}try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(sid),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})}),d=await r.json();if(!r.ok)throw new Error(d.detail||"Status update failed");m.innerText="Shipment status updated.";await loadDriverShipments();}catch(e){m.innerText=e.message;}}
 async function loadDriverShipments(){try{const r=await authFetch(API+"/shipments/"),d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not load assigned shipments");const a=Array.isArray(d.shipments)?d.shipments:[],c=document.getElementById("driverShipments"),sel=document.getElementById("driverGpsShipment");c.innerHTML="";sel.innerHTML='<option value="">Select assigned shipment</option>';a.forEach(x=>{const o=document.createElement("option");o.value=x.shipment_id;o.textContent=x.shipment_id+" — "+(x.origin||"")+" → "+(x.destination||"");sel.appendChild(o);});if(!a.length){c.innerText="No assigned shipments.";return;}a.forEach(x=>{const e=document.createElement("div");e.className="shipment";e.innerHTML=`<strong>${x.shipment_id}</strong><p>${x.origin||""} → ${x.destination||""}</p><p>Status: ${x.status||"Unknown"}</p><button>Select Shipment</button>`;e.querySelector("button").onclick=()=>{document.getElementById("driverShipmentId").value=x.shipment_id;sel.value=x.shipment_id;};c.appendChild(e);});}catch(e){document.getElementById("driverShipments").innerText=e.message;}}
 window.onload=async()=>{const t=localStorage.getItem("token"),r=localStorage.getItem("role");if(!t||!r){showLogin();return;}try{await authFetch(API+"/shipments/");if(r==="driver")await showDriverDashboard();else await showUserDashboard();}catch(e){logout();}};
+document.addEventListener("DOMContentLoaded",wireCreateShipmentButton);
 </script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </body>
