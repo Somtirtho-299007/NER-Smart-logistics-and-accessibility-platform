@@ -1,20 +1,6 @@
 
 
-Skip to content
-Using Gmail with screen readers
-Enable desktop notifications for Gmail.
-   OK  No thanks
-1 of 270
-(no subject)
-Inbox
 
-Somtirtho Banerjee <somtirthobanerjee16@gmail.com>
-Attachments
-Sat, Sep 5, 8:37 AM (1 day ago)
-to me
-
- 4 Attachments
-  •  Scanned by Gmail
 from fastapi import FastAPI, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -1387,5 +1373,3 @@ def route_intelligence(shipment_id: str, db: Session = Depends(get_db), authoriz
     return {"shipment_id":shipment_id,"origin":shipment.origin,"destination":shipment.destination,
             "origin_coordinates":origin,"destination_coordinates":destination,
             "recommended_route":out[0],"routes":out}
-main_fixed.py
-Displaying main_fixed.py.
