@@ -390,6 +390,20 @@ button:hover {
             Loading...
         </div>
 
+        <div id="editShipmentPanel" class="panel hidden" style="margin-top:15px;border:1px solid #ddd;box-shadow:none;">
+            <h3>Edit Selected Shipment</h3>
+            <input id="editShipmentId" readonly placeholder="Shipment ID">
+            <div class="form-grid">
+                <input id="editOrigin" placeholder="Origin">
+                <input id="editDestination" placeholder="Destination">
+                <input id="editWeight" type="number" step="any" placeholder="Weight">
+                <input id="editCargo" placeholder="Cargo">
+            </div>
+            <button onclick="saveShipmentEdit()">Save Changes</button>
+            <button class="secondary" onclick="cancelShipmentEdit()">Cancel</button>
+            <p id="editShipmentMessage"></p>
+        </div>
+
     </section>
 
     <!-- SHIPMENT OPERATIONS -->
@@ -580,7 +594,7 @@ button:hover {
 </div>
 
 <script>
-const API = "https://ner-smart-logistics-and-accessibility.onrender.com";
+const API="http://127.0.0.1:8000";
 const originalFetch=window.fetch.bind(window);
 async function authFetch(url,options={}){const token=localStorage.getItem("token");if(!token)throw new Error("Not logged in");options.headers={...(options.headers||{}),Authorization:"Bearer "+token};return originalFetch(url,options);}
 function hideEverything(){["loginPage","registerPage","userDashboard","driverDashboard"].forEach(id=>document.getElementById(id).classList.add("hidden"));}
@@ -593,7 +607,11 @@ function logout(){["token","role","username","driver_id"].forEach(k=>localStorag
 async function showUserDashboard(){hideEverything();document.getElementById("userDashboard").classList.remove("hidden");document.getElementById("userWelcome").innerText="Logged in as: "+(localStorage.getItem("username")||"");await loadShipments();}
 async function showDriverDashboard(){hideEverything();document.getElementById("driverDashboard").classList.remove("hidden");document.getElementById("driverWelcome").innerText="Driver ID: "+(localStorage.getItem("driver_id")||"");await loadDriverShipments();}
 async function createShipment(){const s={shipment_id:document.getElementById("shipmentId").value.trim(),origin:document.getElementById("origin").value.trim(),destination:document.getElementById("destination").value.trim(),weight:Number(document.getElementById("weight").value),cargo:document.getElementById("cargo").value.trim(),status:"pending"};try{const r=await authFetch(API+"/shipments/",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(s)}),d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not create shipment");document.getElementById("shipmentMessage").innerText="Shipment created successfully.";await loadShipments();}catch(e){document.getElementById("shipmentMessage").innerText=e.message;}}
-async function loadShipments(){try{const r=await authFetch(API+"/shipments/"),d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not load shipments");const a=Array.isArray(d.shipments)?d.shipments:[],list=document.getElementById("shipmentList");document.getElementById("total").innerText=a.length;document.getElementById("pending").innerText=a.filter(x=>(x.status||"").toLowerCase()==="pending").length;document.getElementById("transit").innerText=a.filter(x=>(x.status||"").toLowerCase()==="in transit").length;document.getElementById("delivered").innerText=a.filter(x=>(x.status||"").toLowerCase()==="delivered").length;document.getElementById("risk").innerText=a.filter(x=>["delayed","shipment altered"].includes((x.status||"").toLowerCase())).length;list.innerHTML="";if(!a.length){list.innerText="No shipments found.";return;}a.forEach(x=>{const e=document.createElement("div");e.className="shipment";e.innerHTML=`<strong>${x.shipment_id||""}</strong><p>${x.origin||""} → ${x.destination||""}</p><p>Cargo: ${x.cargo||""}</p><p>Weight: ${x.weight??""}</p><p>Status: <span class="status">${x.status||"Unknown"}</span></p><p>Driver: ${x.driver_id||"Unassigned"}</p><button>Select</button>`;e.querySelector("button").onclick=()=>document.getElementById("selectedShipment").value=x.shipment_id;list.appendChild(e);});}catch(e){document.getElementById("shipmentList").innerText=e.message;}}
+async function loadShipments(){try{const r=await authFetch(API+"/shipments/"),d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not load shipments");const a=Array.isArray(d.shipments)?d.shipments:[],list=document.getElementById("shipmentList");document.getElementById("total").innerText=a.length;document.getElementById("pending").innerText=a.filter(x=>(x.status||"").toLowerCase()==="pending").length;document.getElementById("transit").innerText=a.filter(x=>(x.status||"").toLowerCase()==="in transit").length;document.getElementById("delivered").innerText=a.filter(x=>(x.status||"").toLowerCase()==="delivered").length;document.getElementById("risk").innerText=a.filter(x=>["delayed","shipment altered"].includes((x.status||"").toLowerCase())).length;list.innerHTML="";if(!a.length){list.innerText="No shipments found.";return;}a.forEach(x=>{const e=document.createElement("div");e.className="shipment";e.innerHTML=`<strong>${x.shipment_id||""}</strong><p>${x.origin||""} → ${x.destination||""}</p><p>Cargo: ${x.cargo||""}</p><p>Weight: ${x.weight??""}</p><p>Status: <span class="status">${x.status||"Unknown"}</span></p><p>Driver: ${x.driver_id||"Unassigned"}</p><button class="selectShipmentBtn">Select</button> <button class="secondary editShipmentBtn">Edit</button> <button class="danger-btn deleteShipmentBtn">Delete</button>`;e.querySelector(".selectShipmentBtn").onclick=()=>document.getElementById("selectedShipment").value=x.shipment_id;e.querySelector(".editShipmentBtn").onclick=()=>openShipmentEdit(x);e.querySelector(".deleteShipmentBtn").onclick=()=>deleteShipment(x.shipment_id);list.appendChild(e);});}catch(e){document.getElementById("shipmentList").innerText=e.message;}}
+function openShipmentEdit(x){const p=document.getElementById("editShipmentPanel");p.classList.remove("hidden");document.getElementById("editShipmentId").value=x.shipment_id||"";document.getElementById("editOrigin").value=x.origin||"";document.getElementById("editDestination").value=x.destination||"";document.getElementById("editWeight").value=x.weight??"";document.getElementById("editCargo").value=x.cargo||"";document.getElementById("editShipmentMessage").innerText="";p.scrollIntoView({behavior:"smooth",block:"center"});}
+function cancelShipmentEdit(){document.getElementById("editShipmentPanel").classList.add("hidden");}
+async function saveShipmentEdit(){const id=document.getElementById("editShipmentId").value.trim(),m=document.getElementById("editShipmentMessage");if(!id){m.innerText="Select a shipment first.";return;}const w=document.getElementById("editWeight").value;const body={origin:document.getElementById("editOrigin").value.trim(),destination:document.getElementById("editDestination").value.trim(),weight:w===""?null:Number(w),cargo:document.getElementById("editCargo").value.trim()};try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(id),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}),d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not update shipment");m.innerText="Shipment updated successfully.";m.className="success";await loadShipments();setTimeout(cancelShipmentEdit,500);}catch(e){m.innerText=e.message;m.className="error";}}
+async function deleteShipment(id){if(!confirm("Delete shipment "+id+"? This cannot be undone."))return;try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(id),{method:"DELETE"});const d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not delete shipment");document.getElementById("shipmentMessage").innerText="Shipment deleted successfully.";document.getElementById("shipmentMessage").className="success";if(document.getElementById("selectedShipment").value===id)document.getElementById("selectedShipment").value="";cancelShipmentEdit();await loadShipments();}catch(e){document.getElementById("shipmentMessage").innerText=e.message;document.getElementById("shipmentMessage").className="error";}}
 async function getTracking(){await simpleIntelligence("/tracking");}
 async function simpleIntelligence(path){const id=document.getElementById("selectedShipment").value.trim(),o=document.getElementById("shipmentResult");if(!id){o.innerText="Select a shipment first.";return;}try{const r=await authFetch(API+"/shipments/"+encodeURIComponent(id)+path),d=await r.json();if(!r.ok)throw new Error(d.detail||"Request failed");o.innerText=JSON.stringify(d,null,2);}catch(e){o.innerText=e.message;}}
 function hideMap(){const b=document.getElementById("routeMap");if(b)b.classList.add("hidden");if(window.routeMap){window.routeMap.remove();window.routeMap=null;}}
@@ -612,4 +630,3 @@ window.onload=async()=>{const t=localStorage.getItem("token"),r=localStorage.get
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </body>
 </html>
-
