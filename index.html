@@ -583,7 +583,7 @@ button:hover {
 </div>
 
 <script>
-const API="https://ner-smart-logistics-and-accessibility-t7ae.onrender.com";
+const API="https://ner-smart-logistics-and-accessibility.onrender.com";
 const originalFetch=window.fetch.bind(window);
 async function authFetch(url,options={}){const token=localStorage.getItem("token");if(!token)throw new Error("Not logged in");options.headers={...(options.headers||{}),Authorization:"Bearer "+token};return originalFetch(url,options);}
 async function readResponse(r){const text=await r.text();let data={};if(text){try{data=JSON.parse(text);}catch{if(!r.ok)throw new Error(`Server returned ${r.status}: ${text.slice(0,200)}`);throw new Error("Server returned an invalid JSON response.");}}if(!r.ok)throw new Error(data.detail||data.message||`Request failed (${r.status})`);return data;}
