@@ -339,6 +339,9 @@ def serialize_shipment(shipment: ShipmentDB, driver_id: str | None):
         "status": shipment.status,
         "owner_username": shipment.owner_username,
         "driver_id": driver_id,
+        "active_route_name": shipment.active_route_name,
+        "active_route_reason": shipment.active_route_reason,
+        "active_route_updated_at": shipment.active_route_updated_at,
     }
 
 
@@ -1122,13 +1125,26 @@ def score_incidents_near_route(route, incidents):
 
     total = min(100.0, total)
 
-    # Build a compact, human-readable explanation (most severe/recent first)
-    matched.sort(key=lambda m: (-SEVERITY_WEIGHT.get(m[0].severity, 15), m[1]))
-    for incident, distance_km, recency in matched[:4]:
-        label = incident.incident_type.replace("_", " ")
+    # Build a compact, human-readable explanation. Group by (type,
+    # severity) so 4 separate "critical landslide" reports on the same
+    # stretch of road read as ONE clear line with a count, closest
+    # distance, and freshest recency — not four near-duplicate lines that
+    # read as noise (this was flagged as confusing/misleading).
+    groups = {}
+    for incident, distance_km, recency in matched:
+        key = (incident.incident_type, incident.severity)
+        g = groups.setdefault(key, {"count": 0, "min_distance": distance_km, "max_recency": recency})
+        g["count"] += 1
+        g["min_distance"] = min(g["min_distance"], distance_km)
+        g["max_recency"] = max(g["max_recency"], recency)
+
+    ordered = sorted(groups.items(), key=lambda kv: (-SEVERITY_WEIGHT.get(kv[0][1], 15), kv[1]["min_distance"]))
+    for (incident_type, severity), g in ordered[:4]:
+        label = incident_type.replace("_", " ")
+        count_note = f" ({g['count']} reports)" if g["count"] > 1 else ""
+        freshness = "just reported" if g["max_recency"] > 0.85 else ("recent" if g["max_recency"] > 0.4 else "older report, reduced weight")
         reasons.append(
-            f"{incident.severity.capitalize()}-severity {label} report ~{round(distance_km, 1)} km from route "
-            f"({round(recency * 100)}% recency weight)"
+            f"{severity.capitalize()}-severity {label}{count_note}, closest ~{round(g['min_distance'], 1)} km from route — {freshness}"
         )
 
     return round(total, 1), reasons, [m[0] for m in matched]
@@ -1215,6 +1231,66 @@ def get_route_road_names(route):
     }
 
 
+def _offset_point_away_from(lat, lon, bearing_deg, distance_km):
+    """
+    Returns a point distance_km away from (lat, lon) along bearing_deg
+    (0=north, 90=east). Used to construct a forced detour waypoint near a
+    blocked road segment so OSRM has to route through a different
+    corridor — the public OSRM server has no "exclude this road" option,
+    but it will always route through a waypoint we explicitly supply.
+    """
+    r = 6371.0
+    brng = math.radians(bearing_deg)
+    lat1 = math.radians(lat)
+    lon1 = math.radians(lon)
+    lat2 = math.asin(math.sin(lat1) * math.cos(distance_km / r) +
+                      math.cos(lat1) * math.sin(distance_km / r) * math.cos(brng))
+    lon2 = lon1 + math.atan2(
+        math.sin(brng) * math.sin(distance_km / r) * math.cos(lat1),
+        math.cos(distance_km / r) - math.sin(lat1) * math.sin(lat2)
+    )
+    return math.degrees(lat2), math.degrees(lon2)
+
+
+def get_detour_routes(origin_lat, origin_lon, destination_lat, destination_lon, blocker_lat, blocker_lon):
+    """
+    Requests routes that are forced to pass through waypoints offset
+    around the blocked point (blocker_lat/lon), in four directions
+    (N/E/S/W offsets at 15km), so that at least one of them is forced
+    off the road passing through/near the incident. Returns whichever
+    resulting routes are geometrically distinct from a direct route
+    (i.e. actually avoid the blocked point), deduplicated by distance.
+    This is the standard workaround for the public OSRM server, which
+    has no native "exclude this road" option.
+    """
+    candidates = []
+    for bearing in (0, 90, 180, 270):
+        try:
+            wp_lat, wp_lon = _offset_point_away_from(blocker_lat, blocker_lon, bearing, 15.0)
+            coordinates = f"{origin_lon},{origin_lat};{wp_lon},{wp_lat};{destination_lon},{destination_lat}"
+            url = (
+                "https://router.project-osrm.org/route/v1/driving/"
+                + coordinates
+                + "?overview=full&steps=true&geometries=geojson"
+            )
+            request = urllib.request.Request(url, headers={"User-Agent": "NER-Smart-Logistics-Prototype/1.0"})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = json.loads(response.read().decode())
+            if data.get("code") == "Ok" and data.get("routes"):
+                route = data["routes"][0]
+                geometry = route.get("geometry") or {}
+                coords = geometry.get("coordinates", []) if isinstance(geometry, dict) else []
+                if coords:
+                    min_dist = _min_distance_to_route_km(blocker_lat, blocker_lon, coords)
+                    if min_dist is not None and min_dist > 5.0:
+                        # This detour genuinely avoids the blocked point —
+                        # keep it as a real alternative.
+                        candidates.append(route)
+        except Exception:
+            continue
+    return candidates
+
+
 def build_route_analysis(shipment, db: Session, start_override=None):
     """
     Builds the recommended + alternative route analysis for a shipment.
@@ -1229,6 +1305,44 @@ def build_route_analysis(shipment, db: Session, start_override=None):
     routes = get_routes(origin["latitude"], origin["longitude"], destination["latitude"], destination["longitude"])
 
     active_incidents = db.query(IncidentDB).filter(IncidentDB.active == True).all()  # noqa: E712
+
+    # If the primary route(s) OSRM found are all blocked by a severe,
+    # recent, nearby incident, the public OSRM server's "alternatives"
+    # discovery frequently fails to surface a genuinely different road
+    # (this is a documented OSRM limitation, not something tunable via
+    # query parameters). In that case, actively force a detour around
+    # the worst blocking incident by inserting a waypoint that pushes
+    # the route off the blocked corridor.
+    worst_blocking_incident = None
+    worst_severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    if routes:
+        primary_coords = (routes[0].get("geometry") or {}).get("coordinates", [])
+        for incident in active_incidents:
+            if incident.severity not in ("high", "critical"):
+                continue
+            recency = _incident_recency_factor(incident.created_at)
+            if recency <= 0.2:
+                continue
+            dist = _min_distance_to_route_km(incident.latitude, incident.longitude, primary_coords) if primary_coords else None
+            if dist is not None and dist <= 5.0:  # genuinely blocking the road, not just "in the region"
+                rank = worst_severity_rank.get(incident.severity, 0)
+                if worst_blocking_incident is None or rank > worst_severity_rank.get(worst_blocking_incident.severity, 0):
+                    worst_blocking_incident = incident
+
+    if worst_blocking_incident is not None:
+        detours = get_detour_routes(
+            origin["latitude"], origin["longitude"],
+            destination["latitude"], destination["longitude"],
+            worst_blocking_incident.latitude, worst_blocking_incident.longitude
+        )
+        # Add any detour that isn't essentially identical (by distance) to
+        # a route we already have, so we don't pad the list with near
+        # duplicates of the same blocked road.
+        existing_distances = {round(r["distance"] / 1000, -1) for r in routes}
+        for d in detours:
+            if round(d["distance"] / 1000, -1) not in existing_distances:
+                routes.append(d)
+                existing_distances.add(round(d["distance"] / 1000, -1))
 
     out = []
     for i, route in enumerate(routes):
@@ -1387,7 +1501,13 @@ def route_intelligence(
 ):
     caller = resolve_caller(authorization, db)
     shipment = resolve_shipment_for_caller(db, shipment_id, caller)
-    return build_route_analysis(shipment, db)
+    analysis = build_route_analysis(shipment, db)
+    analysis["driver_accepted_route"] = {
+        "route_name": shipment.active_route_name,
+        "reason": shipment.active_route_reason,
+        "updated_at": shipment.active_route_updated_at
+    } if shipment.active_route_name else None
+    return analysis
 
 
 # Backward-compatible alias in case any older frontend build still calls
@@ -1474,6 +1594,51 @@ def recheck_route(
         "routes": analysis["routes"],
         "alternatives_summary": analysis["alternatives_summary"],
         "data_sources": analysis["data_sources"]
+    }
+
+
+class AcceptRouteRequest(BaseModel):
+    route_name: str
+    reason: str | None = None
+
+
+@app.post("/shipments/{shipment_id}/accept-route")
+def accept_route(
+    shipment_id: str,
+    data: AcceptRouteRequest,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None)
+):
+    """
+    Called by the driver after reviewing Recheck Route, to confirm which
+    route they're now actually following. This is what makes the reroute
+    visible on the DEALER's side — without an explicit accept step, the
+    dealer's Route Intelligence view has no way to know the driver chose
+    to switch off the originally planned route.
+    """
+    token = get_bearer_token(authorization)
+    driver_id = get_driver_from_token(token)
+    shipment = get_shipment_for_driver(db, shipment_id, driver_id)
+    if not shipment:
+        raise HTTPException(status_code=403, detail="Shipment is not assigned to this driver")
+
+    shipment.active_route_name = data.route_name
+    shipment.active_route_reason = data.reason
+    shipment.active_route_updated_at = datetime.utcnow()
+    db.commit()
+
+    db.add(TrackingEventDB(
+        shipment_db_id=shipment.id,
+        status="Route updated",
+        location=data.route_name
+    ))
+    db.commit()
+
+    return {
+        "message": "Route accepted and recorded",
+        "shipment_id": shipment_id,
+        "active_route_name": data.route_name,
+        "active_route_updated_at": shipment.active_route_updated_at
     }
 
 
