@@ -823,7 +823,17 @@ async function getRouteIntelligence() {
     if (!routes.length) throw new Error("No routes returned.");
     const originLabel = d.origin || "Origin";
     const destLabel = d.destination || "Destination";
-    o.innerHTML = routes.map((x, i) => renderRouteCard(x, i === 0, originLabel, destLabel)).join("");
+    let html = "";
+    if (d.driver_accepted_route && d.driver_accepted_route.route_name) {
+      html += `<div class="decision-banner recommend_change">
+        <div><b>Driver switched routes</b><br>
+        Now following: ${d.driver_accepted_route.route_name}<br>
+        ${d.driver_accepted_route.reason || ""}<br>
+        <span style="font-size:11px;color:var(--text-faint);">Updated ${d.driver_accepted_route.updated_at || ""}</span>
+        </div></div>`;
+    }
+    html += routes.map((x, i) => renderRouteCard(x, i === 0, originLabel, destLabel)).join("");
+    o.innerHTML = html;
     renderRouteMap(d);
   } catch (e) { o.innerHTML = `<div class="result-box">${e.message}</div>`; hideMap(); }
 }
@@ -1163,6 +1173,32 @@ async function recheckRoute() {
       <div class="decision-banner ${banner.cls}"><div><b>${banner.text}</b><br>${d.decision_reason || ""}</div></div>
       ${renderRouteCard(rec, true, "Current position", d.shipment_id ? "Destination" : "Destination")}
     `;
+    if (d.decision === "recommend_change") {
+      const acceptBtn = document.createElement("button");
+      acceptBtn.textContent = "Accept this route";
+      acceptBtn.style.marginTop = "10px";
+      acceptBtn.onclick = async () => {
+        try {
+          const ar = await authFetch(API + "/shipments/" + encodeURIComponent(sid) + "/accept-route", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ route_name: rec.route_name || "Updated route", reason: d.decision_reason || "" })
+          });
+          const ad = await ar.json();
+          if (!ar.ok) throw new Error(ad.detail || "Could not accept route");
+          const note = document.createElement("p");
+          note.className = "msg success";
+          note.textContent = "Route accepted — this is now visible to the dealer.";
+          box.appendChild(note);
+          acceptBtn.disabled = true;
+        } catch (e) {
+          const note = document.createElement("p");
+          note.className = "msg error";
+          note.textContent = e.message;
+          box.appendChild(note);
+        }
+      };
+      box.appendChild(acceptBtn);
+    }
   } catch (e) { box.innerHTML = `<div class="result-box">${e.message}</div>`; }
 }
 
