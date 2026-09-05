@@ -685,6 +685,38 @@ def report_incident(
     }
 
 
+@app.get("/incidents/mine")
+def get_my_incidents(
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None)
+):
+    """
+    Incidents reported by the currently logged-in driver, so a driver can
+    see and resolve their own reports directly (e.g. once a blockage they
+    reported has cleared) without needing to know an internal incident ID.
+    """
+    token = get_bearer_token(authorization)
+    driver_id = get_driver_from_token(token)
+
+    incidents = db.query(IncidentDB).filter(
+        IncidentDB.reported_by == driver_id
+    ).order_by(IncidentDB.created_at.desc()).all()
+
+    return {"incidents": [
+        {
+            "id": i.id,
+            "incident_type": i.incident_type,
+            "severity": i.severity,
+            "latitude": i.latitude,
+            "longitude": i.longitude,
+            "road_name": i.road_name,
+            "description": i.description,
+            "active": i.active,
+            "created_at": i.created_at
+        } for i in incidents
+    ]}
+
+
 @app.get("/shipments/{shipment_id}/incidents")
 def get_shipment_incidents(
     shipment_id: str,
@@ -711,6 +743,28 @@ def get_shipment_incidents(
             "created_at": i.created_at
         } for i in incidents
     ]}
+
+
+@app.post("/incidents/{incident_id}/resolve")
+def resolve_incident(
+    incident_id: int,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None)
+):
+    """
+    Marks an incident as no longer active (e.g. blockage cleared, flood
+    receded). Any logged-in driver or dealer can resolve an incident —
+    this is a shared corridor signal, not owned by one account. Once
+    inactive, it's immediately excluded from route/disruption scoring
+    (active_incidents is always filtered by IncidentDB.active == True).
+    """
+    caller = resolve_caller(authorization, db)  # any authenticated user
+    incident = db.query(IncidentDB).filter(IncidentDB.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    incident.active = False
+    db.commit()
+    return {"message": "Incident marked resolved", "incident_id": incident_id}
 
 
 # =========================================================
@@ -796,7 +850,7 @@ def get_routes(origin_lat, origin_lon, destination_lat, destination_lon):
     url = (
         "https://router.project-osrm.org/route/v1/driving/"
         + coordinates
-        + "?alternatives=true&overview=full&steps=true"
+        + "?alternatives=true&overview=full&steps=true&geometries=geojson"
     )
 
     try:
@@ -1029,6 +1083,14 @@ def score_incidents_near_route(route, incidents):
     geometry = route.get("geometry") or {}
     coordinates = geometry.get("coordinates", []) if isinstance(geometry, dict) else []
 
+    if not coordinates:
+        # Route geometry is missing/malformed (e.g. routing API returned an
+        # unexpected shape). Fail loudly instead of silently scoring every
+        # incident as "not near the route" — that failure mode is exactly
+        # what previously made driver-reported incidents invisible to
+        # route risk scoring even when they were right on the route.
+        return 0.0, ["Route geometry unavailable — incident proximity could not be checked"], []
+
     matched = []
     for incident in incidents:
         recency = _incident_recency_factor(incident.created_at)
@@ -1252,6 +1314,67 @@ def shipment_risk(
     }
 
 
+@app.get("/shipments/{shipment_id}/incident-debug")
+def incident_debug(
+    shipment_id: str,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None)
+):
+    """
+    TEMPORARY diagnostic endpoint. For the shipment's current recommended
+    route, shows every active incident in the database with its exact
+    distance to the nearest point on that route, so it's possible to see
+    in one response whether incidents are (a) stored, (b) marked active,
+    (c) within the 50 km corridor, and (d) recent enough to count —
+    without needing browser DevTools.
+    Remove this endpoint once diagnosis is complete.
+    """
+    caller = resolve_caller(authorization, db)
+    shipment = resolve_shipment_for_caller(db, shipment_id, caller)
+
+    origin = geocode_location(shipment.origin)
+    destination = geocode_location(shipment.destination)
+    routes = get_routes(origin["latitude"], origin["longitude"], destination["latitude"], destination["longitude"])
+    route = routes[0]
+    geometry = route.get("geometry") or {}
+    coordinates = geometry.get("coordinates", []) if isinstance(geometry, dict) else []
+
+    all_incidents = db.query(IncidentDB).all()
+
+    report = []
+    for incident in all_incidents:
+        recency = _incident_recency_factor(incident.created_at)
+        distance_km = _min_distance_to_route_km(incident.latitude, incident.longitude, coordinates) if coordinates else None
+        report.append({
+            "id": incident.id,
+            "incident_type": incident.incident_type,
+            "severity": incident.severity,
+            "active": incident.active,
+            "latitude": incident.latitude,
+            "longitude": incident.longitude,
+            "created_at": incident.created_at,
+            "age_hours": round((datetime.utcnow() - incident.created_at).total_seconds() / 3600, 2),
+            "recency_weight": round(recency, 3),
+            "distance_to_route_km": round(distance_km, 2) if distance_km is not None else None,
+            "within_50km_corridor": (distance_km is not None and distance_km <= HAZARD_RADIUS_KM),
+            "would_count": (
+                incident.active
+                and recency > 0.01
+                and distance_km is not None
+                and distance_km <= HAZARD_RADIUS_KM
+            )
+        })
+
+    return {
+        "shipment_id": shipment_id,
+        "route_geometry_point_count": len(coordinates),
+        "route_first_point": coordinates[0] if coordinates else None,
+        "route_last_point": coordinates[-1] if coordinates else None,
+        "total_incidents_in_database": len(all_incidents),
+        "incidents": report
+    }
+
+
 # =========================================================
 # ROUTE INTELLIGENCE ENDPOINT
 # =========================================================
@@ -1314,23 +1437,31 @@ def recheck_route(
     analysis = build_route_analysis(shipment, db, start_override=current_position)
 
     recommended = analysis["recommended_route"]
-    # "Stay on route" vs "change route": if the current best route is
-    # LOW risk, or if switching would only save a negligible amount of
-    # risk/time, tell the driver to stay. Otherwise recommend the switch,
-    # with the specific reason.
-    decision = "stay"
-    decision_reason = "Current route remains the best option — no disruption strong enough to justify a change."
-    if recommended["risk"]["risk"] in ("MEDIUM", "HIGH") and len(analysis["routes"]) > 1:
-        decision = "recommend_change" if recommended["rank"] == 1 and recommended["risk"]["score"] < 50 else "recommend_change"
-        # If the top-ranked route itself carries meaningful incident-driven
-        # risk, or a clearly better alternative exists, flag a change.
-        best = analysis["routes"][0]
-        decision = "recommend_change"
+    # "Stay on route" vs "change route" must be driven by the risk score
+    # itself, not by whether alternative routes exist. The previous logic
+    # only ever recommended a change when len(routes) > 1, so if OSRM
+    # returned a single route for this corridor (common on routes with
+    # only one drivable road), a HIGH-risk / critical-incident route would
+    # silently default to "stay" without the risk ever being checked.
+    risk_level = recommended["risk"]["risk"]
+    if risk_level == "HIGH":
+        decision = "recommend_change" if len(analysis["routes"]) > 1 else "stay_with_caution"
         decision_reason = (
-            f"Recommended route updated based on current position and active disruptions: "
-            f"{'; '.join(best['risk']['reasons'][:2])}"
+            f"Active disruption near your current position: "
+            f"{'; '.join(recommended['risk']['reasons'][:2])}"
         )
-    elif recommended["risk"]["risk"] == "LOW":
+        if decision == "stay_with_caution":
+            decision_reason += ". No alternative route is available for this corridor — proceed with extreme caution or hold position if possible."
+    elif risk_level == "MEDIUM":
+        # Only worth switching if a meaningfully safer alternative exists.
+        safer_alt = next((r for r in analysis["routes"][1:] if r["risk"]["score"] < recommended["risk"]["score"] - 10), None)
+        if safer_alt:
+            decision = "recommend_change"
+            decision_reason = f"A safer alternative is available: {'; '.join(safer_alt['risk']['reasons'][:2]) or 'lower overall risk score'}."
+        else:
+            decision = "stay"
+            decision_reason = f"Elevated risk noted ({'; '.join(recommended['risk']['reasons'][:2])}), but no meaningfully safer alternative is available."
+    else:
         decision = "stay"
         decision_reason = "No active disruption near the remaining route — continue on the current route."
 
@@ -1423,3 +1554,4 @@ def ai_disruption_prediction(
             "incident/delay outcomes have been collected."
         ),
         "data_sources": analysis["data_sources"]
+    }
