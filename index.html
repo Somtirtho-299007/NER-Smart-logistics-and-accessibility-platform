@@ -354,6 +354,7 @@ label.field-label{display:block;font-size:12px;color:var(--text-dim);margin:0 0 
         <button class="secondary" onclick="getAIDisruptionPrediction()">Disruption analysis</button>
         <button class="secondary" onclick="getDriverLocation()">Driver location</button>
         <button class="secondary" onclick="getShipmentIncidents()">Reported incidents</button>
+        <button class="secondary" onclick="getIncidentDebug()">Debug incident matching</button>
       </div>
       <div id="shipmentResult"></div>
       <div id="routeMap" class="hidden"></div>
@@ -461,6 +462,7 @@ label.field-label{display:block;font-size:12px;color:var(--text-dim);margin:0 0 
         <button onclick="reportIncident()">Report incident</button>
       </div>
       <p id="incidentMessage" class="msg"></p>
+      <div id="myIncidentsList" style="margin-top:14px;"></div>
     </section>
 
     <section class="panel">
@@ -555,6 +557,7 @@ async function showDriverDashboard() {
   document.getElementById("driverDashboard").classList.remove("hidden");
   document.getElementById("driverWelcome").innerText = localStorage.getItem("driver_id") || "";
   await loadDriverShipments();
+  await loadMyIncidents();
 }
 
 function statusBadgeClass(status) {
@@ -898,8 +901,11 @@ async function getShipmentIncidents() {
     if (!r.ok) throw new Error(d.detail || "Could not load incidents");
     const incidents = Array.isArray(d.incidents) ? d.incidents : [];
     if (!incidents.length) { o.innerHTML = '<div class="result-box">No incidents reported for this shipment.</div>'; return; }
-    o.innerHTML = incidents.map(i => `
-      <div class="route-card">
+    o.innerHTML = "";
+    incidents.forEach(i => {
+      const card = document.createElement("div");
+      card.className = "route-card";
+      card.innerHTML = `
         <div class="route-card-head">
           <span class="route-tag">${i.incident_type.replace("_", " ").toUpperCase()}</span>
           <span class="badge risk-${i.severity === "critical" || i.severity === "high" ? "HIGH" : i.severity === "medium" ? "MEDIUM" : "LOW"}">${i.severity}</span>
@@ -907,10 +913,68 @@ async function getShipmentIncidents() {
         <p class="route-line">${i.road_name || "Location: " + i.latitude.toFixed(3) + ", " + i.longitude.toFixed(3)}</p>
         <p style="font-size:12.5px;color:var(--text-dim);">${i.description || ""}</p>
         <p style="font-size:11.5px;color:var(--text-faint);margin-top:6px;">Reported ${i.created_at || ""} · ${i.active ? "Active" : "Inactive"}</p>
-      </div>`).join("");
+        <div class="btn-row"></div>`;
+      if (i.active) {
+        const btn = document.createElement("button");
+        btn.className = "secondary";
+        btn.textContent = "Mark resolved / blockage cleared";
+        btn.onclick = () => resolveIncident(i.id, id);
+        card.querySelector(".btn-row").appendChild(btn);
+      }
+      o.appendChild(card);
+    });
   } catch (e) { o.innerHTML = `<div class="result-box">${e.message}</div>`; }
 }
-</script>
+
+async function resolveIncident(incidentId, shipmentId) {
+  try {
+    const r = await authFetch(API + "/incidents/" + encodeURIComponent(incidentId) + "/resolve", { method: "POST" });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "Could not resolve incident");
+    await getShipmentIncidents();
+  } catch (e) {
+    document.getElementById("shipmentResult").innerHTML = `<div class="result-box">${e.message}</div>`;
+  }
+}
+
+async function getIncidentDebug() {
+  const id = document.getElementById("selectedShipment").value.trim();
+  const o = document.getElementById("shipmentResult");
+  hideMap();
+  if (!id) { o.innerHTML = '<p class="empty-state">Select a shipment first.</p>'; return; }
+  o.innerHTML = '<p class="empty-state">Checking incident matching…</p>';
+  try {
+    const r = await authFetch(API + "/shipments/" + encodeURIComponent(id) + "/incident-debug");
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "Debug check failed");
+    const incidents = Array.isArray(d.incidents) ? d.incidents : [];
+    let html = `<div class="result-box">
+Total incidents in database: ${d.total_incidents_in_database}
+Route geometry points: ${d.route_geometry_point_count}
+Route starts near: ${d.route_first_point ? d.route_first_point.join(", ") : "N/A"}
+Route ends near: ${d.route_last_point ? d.route_last_point.join(", ") : "N/A"}
+</div>`;
+    if (!incidents.length) {
+      html += '<div class="result-box">No incidents exist in the database at all.</div>';
+    } else {
+      html += incidents.map(i => `
+        <div class="route-card">
+          <div class="route-card-head">
+            <span class="route-tag">${(i.incident_type || "").toUpperCase()} · ${i.severity}</span>
+            <span class="badge ${i.would_count ? 'risk-LOW' : 'risk-HIGH'}">${i.would_count ? "WOULD COUNT" : "NOT COUNTED"}</span>
+          </div>
+          <div class="reasons-list">
+            active: ${i.active}<br>
+            age: ${i.age_hours} hours (recency weight: ${i.recency_weight})<br>
+            distance to route: ${i.distance_to_route_km === null ? "could not calculate" : i.distance_to_route_km + " km"}<br>
+            within 50km corridor: ${i.within_50km_corridor}<br>
+            reported at: ${i.latitude}, ${i.longitude}
+          </div>
+        </div>`).join("");
+    }
+    o.innerHTML = html;
+  } catch (e) { o.innerHTML = `<div class="result-box">${e.message}</div>`; }
+}</script>
 <script>
 async function loadDrivers() {
   const list = document.getElementById("driversList");
@@ -1031,7 +1095,52 @@ async function reportIncident() {
     if (!r.ok) throw new Error(d.detail || "Could not report incident");
     m.innerText = "Incident reported — it will now factor into route risk scoring."; m.className = "msg success";
     document.getElementById("incidentDescription").value = "";
+    await loadMyIncidents();
   } catch (e) { m.innerText = e.message; m.className = "msg error"; }
+}
+
+async function loadMyIncidents() {
+  const box = document.getElementById("myIncidentsList");
+  if (!box) return;
+  try {
+    const r = await authFetch(API + "/incidents/mine");
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "Could not load your incidents");
+    const incidents = Array.isArray(d.incidents) ? d.incidents : [];
+    if (!incidents.length) { box.innerHTML = ""; return; }
+    box.innerHTML = "";
+    const heading = document.createElement("p");
+    heading.style.cssText = "font-size:12px;color:var(--text-dim);font-weight:600;margin-bottom:8px;";
+    heading.textContent = "Your reported incidents";
+    box.appendChild(heading);
+    incidents.forEach(i => {
+      const card = document.createElement("div");
+      card.className = "route-card";
+      card.style.marginBottom = "8px";
+      card.innerHTML = `
+        <div class="route-card-head">
+          <span class="route-tag">${i.incident_type.replace("_", " ").toUpperCase()} · ${i.severity}</span>
+          <span class="badge ${i.active ? "risk-HIGH" : "risk-LOW"}">${i.active ? "Active" : "Resolved"}</span>
+        </div>
+        <p class="route-line">${i.road_name || i.latitude.toFixed(3) + ", " + i.longitude.toFixed(3)}</p>
+        <p style="font-size:11.5px;color:var(--text-faint);">Reported ${i.created_at || ""}</p>
+        <div class="btn-row"></div>`;
+      if (i.active) {
+        const btn = document.createElement("button");
+        btn.className = "secondary";
+        btn.textContent = "Mark resolved / blockage cleared";
+        btn.onclick = async () => {
+          try {
+            const rr = await authFetch(API + "/incidents/" + encodeURIComponent(i.id) + "/resolve", { method: "POST" });
+            if (!rr.ok) { const dd = await rr.json(); throw new Error(dd.detail || "Could not resolve"); }
+            await loadMyIncidents();
+          } catch (e) { document.getElementById("incidentMessage").innerText = e.message; document.getElementById("incidentMessage").className = "msg error"; }
+        };
+        card.querySelector(".btn-row").appendChild(btn);
+      }
+      box.appendChild(card);
+    });
+  } catch (e) { box.innerHTML = ""; }
 }
 
 async function recheckRoute() {
@@ -1044,10 +1153,14 @@ async function recheckRoute() {
     const d = await r.json();
     if (!r.ok) throw new Error(d.detail || "Recheck route failed");
     const rec = d.recommended_route || {};
-    const bannerClass = d.decision === "stay" ? "stay" : "recommend_change";
-    const bannerText = d.decision === "stay" ? "Stay on your current route" : "Route change recommended";
+    const bannerMap = {
+      stay: { cls: "stay", text: "Stay on your current route" },
+      recommend_change: { cls: "recommend_change", text: "Route change recommended" },
+      stay_with_caution: { cls: "recommend_change", text: "No alternative route — proceed with caution" }
+    };
+    const banner = bannerMap[d.decision] || bannerMap.stay;
     box.innerHTML = `
-      <div class="decision-banner ${bannerClass}"><div><b>${bannerText}</b><br>${d.decision_reason || ""}</div></div>
+      <div class="decision-banner ${banner.cls}"><div><b>${banner.text}</b><br>${d.decision_reason || ""}</div></div>
       ${renderRouteCard(rec, true, "Current position", d.shipment_id ? "Destination" : "Destination")}
     `;
   } catch (e) { box.innerHTML = `<div class="result-box">${e.message}</div>`; }
