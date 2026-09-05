@@ -50,6 +50,13 @@ class ShipmentDB(Base):
     owner_username = Column(String, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # Populated when a driver accepts a rerouted path from Recheck Route.
+    # Lets the dealer's Route Intelligence view show the ACTUAL route the
+    # driver is now following, not just the originally planned one.
+    active_route_name = Column(String, nullable=True)
+    active_route_reason = Column(String, nullable=True)
+    active_route_updated_at = Column(DateTime, nullable=True)
+
 
 class TrackingEventDB(Base):
     __tablename__ = "tracking_events"
