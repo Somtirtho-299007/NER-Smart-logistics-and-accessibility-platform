@@ -1423,4 +1423,3 @@ def ai_disruption_prediction(
             "incident/delay outcomes have been collected."
         ),
         "data_sources": analysis["data_sources"]
-    }
